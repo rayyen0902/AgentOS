@@ -38,6 +38,11 @@ services:
     env_file:
       - .env
       - python-service/.env
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
     depends_on:
       postgres:
         condition: service_healthy
@@ -52,6 +57,11 @@ services:
     env_file:
       - .env
       - go-service/.env
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
     depends_on:
       postgres:
         condition: service_healthy
