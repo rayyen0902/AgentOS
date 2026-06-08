@@ -6,7 +6,7 @@ services:
   postgres:
     image: pgvector/pgvector:pg15
     ports:
-      - "5432:5432"
+      - "5433:5432"
     environment:
       POSTGRES_USER: ${PG_USER:-agentos}
       POSTGRES_PASSWORD: ${PG_PASSWORD:-agentos123}
@@ -23,7 +23,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "6380:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
