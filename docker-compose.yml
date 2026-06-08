@@ -32,8 +32,7 @@ services:
 
   python-service:
     profiles: ["full"]
-    build:
-      context: ./python-service
+    image: ghcr.io/rayyen0902/agentos-python-service:latest
     ports:
       - "8000:8000"
     env_file:
@@ -47,8 +46,7 @@ services:
 
   go-service:
     profiles: ["full"]
-    build:
-      context: ./go-service
+    image: ghcr.io/rayyen0902/agentos-go-service:latest
     ports:
       - "8080:8080"
     env_file:
