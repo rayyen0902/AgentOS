@@ -35,6 +35,9 @@ services:
     image: ghcr.io/rayyen0902/agentos-python-service:latest
     ports:
       - "8001:8000"
+    environment:
+      DATABASE_URL: postgres://agentos:agentos123@postgres:5432/agentos?sslmode=disable
+      REDIS_URL: redis://redis:6379
     env_file:
       - .env
       - python-service/.env
@@ -54,6 +57,10 @@ services:
     image: ghcr.io/rayyen0902/agentos-go-service:latest
     ports:
       - "8080:8080"
+    environment:
+      DATABASE_URL: postgres://agentos:agentos123@postgres:5432/agentos?sslmode=disable
+      REDIS_URL: redis:6379
+      PYTHON_SERVICE_URL: http://python-service:8000
     env_file:
       - .env
       - go-service/.env
