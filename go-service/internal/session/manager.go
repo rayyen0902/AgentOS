@@ -3,12 +3,17 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/agentos/go-service/internal/model"
 	redisutil "github.com/agentos/go-service/internal/redis"
+	"github.com/redis/go-redis/v9"
 )
+
+// ErrSessionNotFound is returned by Get when the session key does not exist in Redis.
+var ErrSessionNotFound = errors.New("session not found")
 
 const (
 	sessionKeyPrefix   = "session:"
@@ -33,6 +38,9 @@ func agentLockKey(sessionID string) string  { return agentLockPrefix + sessionID
 func (m *Manager) Get(ctx context.Context, sessionID string) (*model.SessionState, error) {
 	var state model.SessionState
 	if err := m.redis.GetJSON(ctx, sessionKey(sessionID), &state); err != nil {
+		if errors.Is(err, redis.Nil) {
+			return nil, ErrSessionNotFound
+		}
 		return nil, fmt.Errorf("session get: %w", err)
 	}
 	return &state, nil

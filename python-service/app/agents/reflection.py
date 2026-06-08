@@ -290,6 +290,10 @@ async def trigger_reflection_async(
     异步触发 Reflection（不阻塞主流程）。
     使用 asyncio.create_task 在后台运行。
 
+    S8-01: 稳定 API 签名 — (ctx, result, agent_name) 三个必选参数是 Step 6 及各
+    Agent 调用方（diagnosis_agent, workshop_agent, photo_analyst_agent, routes.py）
+    约定的接口。tool_calls 为可选参数，仅在调用方记录了工具调用时传入。
+
     用法（在 Agent 完成时调用）:
         asyncio.create_task(trigger_reflection_async(ctx, result, agent_name))
     """

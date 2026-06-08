@@ -102,10 +102,9 @@ func RateLimit(cfg *config.Config) func(http.Handler) http.Handler {
 	global := newTokenBucket(cfg.RateLimitGlobal)
 	users := newUserBucket(cfg.RateLimitUserMsg)
 
-	// S3-08: Start background goroutine to periodically evict stale user entries
+	// S3-08: Start background goroutine to periodically evict stale user entries.
 	go users.evictLoop(5 * time.Minute)
-	// Drain the evict goroutine on program exit — caller should use the returned cleanup
-	// Note: this is a minor leak; in production, use a global cleaner.
+	// Call the returned cleanup function to stop the evictLoop goroutine on shutdown.
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -121,6 +120,33 @@ func RateLimit(cfg *config.Config) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// RateLimitWithCleanup returns the rate-limit middleware plus a cleanup function
+// that stops the background eviction goroutine. Callers should defer the cleanup.
+func RateLimitWithCleanup(cfg *config.Config) (func(http.Handler) http.Handler, func()) {
+	global := newTokenBucket(cfg.RateLimitGlobal)
+	users := newUserBucket(cfg.RateLimitUserMsg)
+
+	go users.evictLoop(5 * time.Minute)
+
+	cleanup := func() { close(users.stopCh) }
+
+	mw := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !global.allow() {
+				WriteJSON(w, model.CodeRateLimited, model.NewErrorResponse(model.CodeRateLimited, "global rate limit exceeded", GetTraceID(r.Context())))
+				return
+			}
+			userID := r.Header.Get("X-User-ID")
+			if userID != "" && !users.allow(userID) {
+				WriteJSON(w, model.CodeRateLimited, model.NewErrorResponse(model.CodeRateLimited, "user rate limit exceeded", GetTraceID(r.Context())))
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+	return mw, cleanup
 }
 
 // ---------- JSON helpers ----------
@@ -167,13 +193,18 @@ func (tb *tokenBucket) allow() bool {
 }
 
 type userBucket struct {
-	rate  int
-	users map[string]*tokenBucket
-	mu    sync.Mutex
+	rate   int
+	users  map[string]*tokenBucket
+	stopCh chan struct{}
+	mu     sync.Mutex
 }
 
 func newUserBucket(ratePerMin int) *userBucket {
-	return &userBucket{rate: ratePerMin, users: make(map[string]*tokenBucket)}
+	return &userBucket{
+		rate:   ratePerMin,
+		users:  make(map[string]*tokenBucket),
+		stopCh: make(chan struct{}),
+	}
 }
 
 func (ub *userBucket) allow(userID string) bool {
@@ -192,17 +223,22 @@ func (ub *userBucket) allow(userID string) bool {
 func (ub *userBucket) evictLoop(interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	for range ticker.C {
-		ub.mu.Lock()
-		cutoff := time.Now().Add(-2 * time.Minute)
-		for id, tb := range ub.users {
-			tb.mu.Lock()
-			lastAccess := tb.lastAllow
-			tb.mu.Unlock()
-			if lastAccess.Before(cutoff) {
-				delete(ub.users, id)
+	for {
+		select {
+		case <-ticker.C:
+			ub.mu.Lock()
+			cutoff := time.Now().Add(-2 * time.Minute)
+			for id, tb := range ub.users {
+				tb.mu.Lock()
+				lastAccess := tb.lastAllow
+				tb.mu.Unlock()
+				if lastAccess.Before(cutoff) {
+					delete(ub.users, id)
+				}
 			}
+			ub.mu.Unlock()
+		case <-ub.stopCh:
+			return
 		}
-		ub.mu.Unlock()
 	}
 }

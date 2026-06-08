@@ -10,7 +10,7 @@
     return;
   }
 
-  var baseUrl = scriptTag.getAttribute('data-api-base') || 'https://hufu.cn';
+  var baseUrl = scriptTag.getAttribute('data-api-base') || 'https://knownot.cc';
 
   // ============================================================
   // Shadow DOM host — the toggle button and iframe container live

@@ -3,12 +3,14 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"time"
 
 	"github.com/agentos/go-service/internal/middleware"
 	"github.com/agentos/go-service/internal/model"
+	"github.com/agentos/go-service/internal/session"
 )
 
 func Health(w http.ResponseWriter, r *http.Request) {
@@ -16,19 +18,25 @@ func Health(w http.ResponseWriter, r *http.Request) {
 }
 
 // Auth stubs — return placeholder responses.
+// TODO(Step 4): Implement real phone login/signup flow (Register/Login/SendCode).
+
+// TODO(Step 4): Implement real phone registration with SMS verification.
 func Register(w http.ResponseWriter, r *http.Request) {
 	middleware.WriteJSON(w, 0, model.NewSuccessResponse(map[string]string{"message": "register ok"}, middleware.GetTraceID(r.Context())))
 }
 
+// TODO(Step 4): Implement real login with JWT token issuance.
 func Login(w http.ResponseWriter, r *http.Request) {
-	middleware.WriteJSON(w, 0, model.NewSuccessResponse(map[string]string{"token": "jwt_placeholder"}, middleware.GetTraceID(r.Context())))
+	middleware.WriteJSON(w, 0, model.NewSuccessResponse(map[string]string{"token": "placeholder-jwt-token"}, middleware.GetTraceID(r.Context())))
 }
 
+// TODO(Step 4): Implement real SMS verification code delivery.
 func SendCode(w http.ResponseWriter, r *http.Request) {
 	middleware.WriteJSON(w, 0, model.NewSuccessResponse(map[string]string{"message": "code sent"}, middleware.GetTraceID(r.Context())))
 }
 
-// Admin stubs.
+// Admin stubs — all are Step 4 scope.
+// TODO(Step 4): Implement real tenant management (ListTenants/ApproveTenant/GetTenant).
 func ListTenants(w http.ResponseWriter, r *http.Request) {
 	middleware.WriteJSON(w, 0, model.NewSuccessResponse([]map[string]interface{}{}, middleware.GetTraceID(r.Context())))
 }
@@ -102,7 +110,14 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 
 	// ── Load or create session state ──
 	state, err := h.Session.Get(ctx, body.SessionID)
-	if err != nil || state == nil {
+	if err != nil && !errors.Is(err, session.ErrSessionNotFound) {
+		// Redis connectivity issue or other real error — do not mask it
+		log.Printf("[ERROR] session get: %v", err)
+		middleware.WriteJSON(w, model.CodePythonDown,
+			model.NewErrorResponse(model.CodePythonDown, "session service unavailable", traceID))
+		return
+	}
+	if errors.Is(err, session.ErrSessionNotFound) || state == nil {
 		// Session not in Redis → create
 		state, err = h.Session.Create(ctx, body.SessionID, body.UserID, body.TenantID, body.Platform)
 		if err != nil {

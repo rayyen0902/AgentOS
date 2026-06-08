@@ -186,8 +186,8 @@ export function RegisterPage({ onSuccess }: Props) {
               type="password"
               value={form.password}
               onChange={handleChange('password')}
-              placeholder="设置密码（至少6位）"
-              minLength={6}
+              placeholder="8-32位，需含大小写字母和数字"
+              minLength={8}
               required
             />
           </label>

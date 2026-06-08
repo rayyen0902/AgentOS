@@ -29,6 +29,11 @@ dist/
 *.pem
 *.key
 credentials.json
+资源.md
 
 # Claude
 .claude/
+go-service/server
+go-service/dump.rdb
+*.rdb
+web/dist/

@@ -42,7 +42,7 @@ async def _fe_retrieve_impl(
     import httpx
 
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        async with httpx.AsyncClient(timeout=settings.FE_GRPC_TIMEOUT) as client:
             resp = await client.post(
                 f"http://{settings.FE_GRPC_HOST}:{settings.FE_GRPC_PORT}/api/v1/retrieve",
                 json={
@@ -127,7 +127,7 @@ async def _fe_ingest_impl(
     import uuid
 
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        async with httpx.AsyncClient(timeout=settings.FE_GRPC_TIMEOUT) as client:
             resp = await client.post(
                 f"http://{settings.FE_GRPC_HOST}:{settings.FE_GRPC_PORT}/api/v1/ingest",
                 json={

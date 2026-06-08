@@ -11,6 +11,11 @@ Agent Journal（成长日志）定时任务
 - 策略调整建议
 
 输出: 写入 agent_audit_log + 通知管理员
+
+Scheduled tasks (Agent Journal, Evaluation) implementation:
+- Recommended: APScheduler (BackgroundScheduler) for in-process scheduling
+- Alternative: OS crontab or systemd timer for production
+- Current: Manual trigger via API endpoint (no automatic scheduling yet)
 """
 import asyncio
 import json

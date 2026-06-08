@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -29,14 +30,16 @@ type Handler struct {
 	WeCom       *platform.WeComAdapter
 	Douyin      *platform.DouyinAdapter
 	XHS         *platform.XHSAdapter
+	httpClient  *http.Client
 }
 
 func New(cfg *config.Config, sm *session.Manager, broker *sse.Broker, redis *redisutil.Client) *Handler {
 	return &Handler{
-		Config:    cfg,
-		Session:   sm,
-		SSEBroker: broker,
-		Redis:     redis,
+		Config:     cfg,
+		Session:    sm,
+		SSEBroker:  broker,
+		Redis:      redis,
+		httpClient: newHTTPClient(cfg.PythonServiceTimeout),
 	}
 }
 
@@ -48,6 +51,7 @@ func NewWithPlatforms(cfg *config.Config, sm *session.Manager, broker *sse.Broke
 		SSEBroker:   broker,
 		Redis:       redis,
 		PlatformMgr: pm,
+		httpClient:  newHTTPClient(cfg.PythonServiceTimeout),
 	}
 
 	// Wire platform adapters with the forward callback
@@ -59,19 +63,28 @@ func NewWithPlatforms(cfg *config.Config, sm *session.Manager, broker *sse.Broke
 }
 
 // pythonRequest is the shared low-level HTTP call for all Go→Python forwarding paths.
-// S3-14: single implementation replaces 4 duplicate functions.
+// Uses a shared http.Client with connection pooling; custom timeout uses context.WithTimeout.
 func (h *Handler) pythonRequest(endpoint string, reqBody interface{}, timeout time.Duration) (map[string]interface{}, error) {
 	payload, _ := json.Marshal(reqBody)
-	if timeout <= 0 {
-		timeout = h.Config.PythonServiceTimeout
-	}
 
-	client := &http.Client{Timeout: timeout}
-	resp, err := client.Post(
-		strings.TrimRight(h.Config.PythonServiceURL, "/")+endpoint,
-		"application/json",
-		bytes.NewReader(payload),
-	)
+	targetURL := strings.TrimRight(h.Config.PythonServiceURL, "/") + endpoint
+
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(context.Background(), timeout)
+	} else {
+		ctx, cancel = context.WithTimeout(context.Background(), h.Config.PythonServiceTimeout)
+	}
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("python request failed: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := h.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("python request failed: %w", err)
 	}
@@ -232,5 +245,22 @@ func (h *Handler) handleWebhookPOST(w http.ResponseWriter, r *http.Request, plat
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(`{"code":4001,"message":"unknown platform"}`))
 		log.Printf("[WEBHOOK] unknown platform '%s' for POST (trace=%s)", platformName, traceID)
+	}
+}
+
+// newHTTPClient creates a shared http.Client with connection pooling for reuse
+// across all Go→Python forwarding requests.
+func newHTTPClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 20,
+			IdleConnTimeout:     90 * time.Second,
+		},
 	}
 }

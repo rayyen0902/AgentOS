@@ -26,6 +26,12 @@ func Middleware(cfg *config.Config) func(http.Handler) http.Handler {
 				}
 			}
 
+			// Dev mode: skip auth for all routes
+			if cfg.ENV == "development" {
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			// S3-03: SSE endpoint supports query param token for EventSource compatibility.
 			if path == "/api/v1/chat/stream" {
 				tokenStr := r.URL.Query().Get("token")

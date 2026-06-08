@@ -87,7 +87,9 @@ func main() {
 	// Outermost middleware runs first on inbound request, last on outbound response.
 	var httpHandler http.Handler = mux
 	httpHandler = auth.Middleware(cfg)(httpHandler)
-	httpHandler = middleware.RateLimit(cfg)(httpHandler)
+	rateLimitMw, rateLimitCleanup := middleware.RateLimitWithCleanup(cfg)
+	defer rateLimitCleanup()
+	httpHandler = rateLimitMw(httpHandler)
 	httpHandler = middleware.Logger(httpHandler)
 	httpHandler = middleware.RequestID(httpHandler)
 	httpHandler = middleware.Recovery(httpHandler)

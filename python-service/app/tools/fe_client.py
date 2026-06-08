@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 FE_GRPC_TARGET = f"{settings.FE_GRPC_HOST}:{settings.FE_GRPC_PORT}"
 FE_HTTP_BASE = f"http://{settings.FE_GRPC_HOST}:{settings.FE_GRPC_PORT}"
-FE_TIMEOUT = 5.0  # 文档规定 5s (S5-10: 已统一 float)
+FE_TIMEOUT = settings.FE_GRPC_TIMEOUT  # S5-10: 从 config 读取，统一解析为浮点秒数
 
 
 def _kin_id_from_input(user_id: int, namespace: str) -> Optional[str]:

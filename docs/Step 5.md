@@ -100,7 +100,8 @@ def rrf_merge(semantic: list, keyword: list, top_k: int, k: int = 60) -> list:
     for rank, item in enumerate(keyword):
         scores[item.id] = scores.get(item.id, 0) + 1 / (k + rank + 1)
     sorted_ids = sorted(scores, key=scores.get, reverse=True)
-    return [get_product(id) for id in sorted_ids[:top_k]]
+    # S5-14: get_product() 替换为 product_crud(read) 或直接 SQL SELECT
+    return [product_crud(ProductCRUDInput(action="read", tenant_id=tid, product_id=id)) for id in sorted_ids[:top_k]]
 ```
 
 - **重试**：2 次，间隔 500ms

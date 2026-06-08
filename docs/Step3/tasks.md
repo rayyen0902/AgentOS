@@ -37,5 +37,5 @@
 - [x] **S3-13** `go-service/cmd/server/main.go` — shutdown 时 SSE Broker 的 subscriber channels 未 drain/close，goroutine 泄漏 **→ unsubscribe 一键 drain+close**
 - [x] **S3-14** `go-service/internal/handler/forward.go` — 4 个 forward 函数 (`forwardToPython`/`V2`/`Normalized`/`Resume`) 97% 重复 **→ 提取 `pythonRequest` 统一实现，4 个函数全部代理**
 - [x] **S3-15** `go-service/internal/handler/forward.go:274` — `serializeAgentState` 静默丢弃 `json.Unmarshal` 错误 **→ 检查 Unmarshal error 并 WARN 日志**
-- [ ] **S3-16** `go-service/internal/handler/handler.go` — Auth 桩函数 (Register/Login/SendCode/approve) 全部返回 hardcode 占位数据 **→ 标注为 Step 4 实施范围**
-- [ ] **S3-17** `go-service/internal/handler/handler.go:198` — `handleResume` 传 `nil` 给 `forwardResumeToPython`，trace chain 断裂 **→ 改为 `ctx` 参数**
+- [x] **S3-16** `go-service/internal/handler/handler.go` — Auth 桩函数 (Register/Login/SendCode/approve) 全部返回 hardcode 占位数据 **→ 添加 `TODO(Step 4)` 注释标注；所有 stub 返回有效 JSON 占位数据**。fixes #26
+- [x] **S3-17** `go-service/internal/handler/handler.go:198` — `handleResume` 传 `nil` 给 `forwardResumeToPython`，trace chain 断裂 **→ 早已修复（commit 4340324）：`ctx := r.Context()` 逐层传递至 `forwardResumeToPython`**。fixes #26

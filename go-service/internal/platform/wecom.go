@@ -174,15 +174,15 @@ func (a *WeComAdapter) asyncActivePush(cfg *TenantPlatform, decMsg *WeComDecrypt
 	result, err := a.forward(ctx, normalized)
 	if err != nil {
 		log.Printf("[WECOM] forward to Python failed (trace=%s): %v", traceID, err)
-		a.pushTextMessage(cfg, decMsg.FromUserName, "抱歉，处理超时，请稍后再试。")
+		a.pushTextMessage(ctx, cfg, decMsg.FromUserName, "抱歉，处理超时，请稍后再试。")
 		return
 	}
 
-	a.pushResultCard(cfg, decMsg.FromUserName, result)
+	a.pushResultCard(ctx, cfg, decMsg.FromUserName, result)
 }
 
-func (a *WeComAdapter) pushTextMessage(cfg *TenantPlatform, openID, text string) {
-	accessToken, err := a.getAccessToken(cfg)
+func (a *WeComAdapter) pushTextMessage(ctx context.Context, cfg *TenantPlatform, openID, text string) {
+	accessToken, err := a.getAccessToken(ctx, cfg)
 	if err != nil {
 		log.Printf("[WECOM] get access_token failed: %v", err)
 		return
@@ -196,11 +196,11 @@ func (a *WeComAdapter) pushTextMessage(cfg *TenantPlatform, openID, text string)
 		Text:    &WeComTextContent{Content: text},
 	}
 
-	a.sendActivePush(accessToken, push, 0, cfg)
+	a.sendActivePush(ctx, accessToken, push, 0, cfg)
 }
 
-func (a *WeComAdapter) pushResultCard(cfg *TenantPlatform, openID, result string) {
-	accessToken, err := a.getAccessToken(cfg)
+func (a *WeComAdapter) pushResultCard(ctx context.Context, cfg *TenantPlatform, openID, result string) {
+	accessToken, err := a.getAccessToken(ctx, cfg)
 	if err != nil {
 		log.Printf("[WECOM] get access_token failed: %v", err)
 		return
@@ -225,7 +225,7 @@ func (a *WeComAdapter) pushResultCard(cfg *TenantPlatform, openID, result string
 		},
 	}
 
-	a.sendActivePush(accessToken, push, 0, cfg)
+	a.sendActivePush(ctx, accessToken, push, 0, cfg)
 }
 
 // getAgentID reads the AgentID from config (S7-07 fix: was hardcoded 1000002).
@@ -238,7 +238,7 @@ func (a *WeComAdapter) getAgentID(cfg *TenantPlatform) int {
 }
 
 // sendActivePush calls POST /cgi-bin/message/send with retry (max 3 per doc section 7A).
-func (a *WeComAdapter) sendActivePush(accessToken string, push WeComActivePush, retryCount int, cfg *TenantPlatform) {
+func (a *WeComAdapter) sendActivePush(ctx context.Context, accessToken string, push WeComActivePush, retryCount int, cfg *TenantPlatform) {
 	body, err := json.Marshal(push)
 	if err != nil {
 		log.Printf("[WECOM] marshal push body: %v", err)
@@ -251,9 +251,15 @@ func (a *WeComAdapter) sendActivePush(accessToken string, push WeComActivePush, 
 	if err != nil {
 		log.Printf("[WECOM] active push error: %v", err)
 		if retryCount < 3 {
+			select {
+			case <-ctx.Done():
+				log.Printf("[WECOM] active push aborted due to context: %v", ctx.Err())
+				return
+			default:
+			}
 			log.Printf("[WECOM] retrying active push (%d/3)", retryCount+1)
 			time.Sleep(time.Duration(retryCount+1) * 500 * time.Millisecond)
-			a.sendActivePush(accessToken, push, retryCount+1, cfg)
+			a.sendActivePush(ctx, accessToken, push, retryCount+1, cfg)
 		}
 		return
 	}
@@ -273,14 +279,20 @@ func (a *WeComAdapter) sendActivePush(accessToken string, push WeComActivePush, 
 		log.Printf("[WECOM] push failed: errcode=%d errmsg=%s", tokenResp.ErrCode, tokenResp.ErrMsg)
 		if tokenResp.ErrCode == 42001 || tokenResp.ErrCode == 40014 {
 			if retryCount < 3 {
+				select {
+				case <-ctx.Done():
+					log.Printf("[WECOM] active push aborted due to context: %v", ctx.Err())
+					return
+				default:
+				}
 				// S7-14: use context.WithTimeout instead of context.Background()
-				delCtx, delCancel := context.WithTimeout(context.Background(), 3*time.Second)
+				delCtx, delCancel := context.WithTimeout(ctx, 3*time.Second)
 				a.mgr.redis.Delete(delCtx, fmt.Sprintf(accessTokenKeyPrefix, "wecom", cfg.AppID))
 				delCancel()
 				time.Sleep(time.Duration(retryCount+1) * 500 * time.Millisecond)
-				newToken, err := a.getAccessToken(cfg)
+				newToken, err := a.getAccessToken(ctx, cfg)
 				if err == nil {
-					a.sendActivePush(newToken, push, retryCount+1, cfg)
+					a.sendActivePush(ctx, newToken, push, retryCount+1, cfg)
 				}
 			}
 		}
@@ -291,9 +303,8 @@ func (a *WeComAdapter) sendActivePush(accessToken string, push WeComActivePush, 
 }
 
 // getAccessToken retrieves or refreshes WeCom access_token (doc section 7A: Redis TTL = expires_in - 60s).
-func (a *WeComAdapter) getAccessToken(cfg *TenantPlatform) (string, error) {
-	// S7-14: use context.WithTimeout
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+func (a *WeComAdapter) getAccessToken(parentCtx context.Context, cfg *TenantPlatform) (string, error) {
+	ctx, cancel := context.WithTimeout(parentCtx, 5*time.Second)
 	defer cancel()
 
 	cached, err := a.mgr.GetCachedAccessToken(ctx, "wecom", cfg.AppID)

@@ -1,0 +1,154 @@
+name: CD — Deploy AgentOS
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "go-service/**"
+      - "python-service/**"
+      - "web/**"
+      - "docker-compose.yml"
+      - ".github/workflows/cd.yml"
+
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        default: "staging"
+        options:
+          - staging
+          - production
+
+concurrency:
+  group: agentos-cd-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    name: Build & Deploy to ${{ github.event.inputs.environment || 'staging' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      # ── Step a: Checkout ──────────────────────────────────────
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ── Step b: Build Docker images (validation) ──────────────
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build go-service image
+        run: |
+          docker build -t agentos-go-service:ci ./go-service
+
+      - name: Build python-service image
+        run: |
+          docker build -t agentos-python-service:ci ./python-service
+
+      # ── Step c: Build React frontend ──────────────────────────
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build web frontend
+        working-directory: ./web
+        run: |
+          npm ci
+          npm run build
+
+      # ── Step d: Deploy artifacts to server via SCP ────────────
+      - name: Install sshpass
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sshpass
+
+      - name: Create remote directory
+        run: |
+          sshpass -p "${{ secrets.SSH_PASSWORD }}" \
+            ssh -o StrictHostKeyChecking=no \
+              ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} \
+              "mkdir -p /opt/agentos/{go-service,python-service,web/dist,nginx,docker}"
+
+      - name: SCP docker-compose.yml
+        run: |
+          sshpass -p "${{ secrets.SSH_PASSWORD }}" \
+            scp -o StrictHostKeyChecking=no \
+              docker-compose.yml \
+              ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/opt/agentos/
+
+      - name: SCP go-service
+        run: |
+          sshpass -p "${{ secrets.SSH_PASSWORD }}" \
+            scp -o StrictHostKeyChecking=no -r \
+              go-service/ \
+              ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/opt/agentos/go-service/
+
+      - name: SCP python-service
+        run: |
+          sshpass -p "${{ secrets.SSH_PASSWORD }}" \
+            scp -o StrictHostKeyChecking=no -r \
+              python-service/ \
+              ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/opt/agentos/python-service/
+
+      - name: SCP web dist
+        run: |
+          sshpass -p "${{ secrets.SSH_PASSWORD }}" \
+            scp -o StrictHostKeyChecking=no -r \
+              web/dist/ \
+              ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/opt/agentos/web/dist/
+
+      - name: SCP nginx config
+        run: |
+          sshpass -p "${{ secrets.SSH_PASSWORD }}" \
+            scp -o StrictHostKeyChecking=no -r \
+              nginx/ \
+              ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/opt/agentos/nginx/
+
+      - name: SCP docker init scripts (if present)
+        run: |
+          sshpass -p "${{ secrets.SSH_PASSWORD }}" \
+            scp -o StrictHostKeyChecking=no -r \
+              docker/ \
+              ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/opt/agentos/docker/
+
+      # ── Step e: Rebuild & restart on server ──────────────────
+      - name: Docker compose rebuild and restart
+        run: |
+          sshpass -p "${{ secrets.SSH_PASSWORD }}" \
+            ssh -o StrictHostKeyChecking=no \
+              ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} \
+              "set -e;
+               cd /opt/agentos;
+               echo '=== Stopping existing containers ===';
+               docker compose --profile full down || true;
+               echo '=== Building images (no cache) ===';
+               docker compose --profile full build --no-cache;
+               echo '=== Starting services ===';
+               docker compose --profile full up -d;
+               echo '=== Waiting for startup ===';
+               sleep 15;
+               echo '=== Health check ===';
+               curl -sf -o /dev/null -w '%{http_code}' http://localhost:8080/health && echo ' OK' || echo ' FAILED'"
+
+      - name: Final health check
+        run: |
+          sshpass -p "${{ secrets.SSH_PASSWORD }}" \
+            ssh -o StrictHostKeyChecking=no \
+              ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} \
+              "curl -sf -o /dev/null -w 'Health endpoint returned HTTP %{http_code}\n' http://localhost:8080/health"
+
+      # ── Step f: Failure notification ─────────────────────────
+      - name: Notify failure
+        if: failure()
+        run: |
+          echo "==========================================="
+          echo "  DEPLOY FAILED — check logs above"
+          echo "  Branch: ${{ github.ref_name }}"
+          echo "  Commit: ${{ github.sha }}"
+          echo "  Run:    ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "==========================================="

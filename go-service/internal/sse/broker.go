@@ -35,6 +35,12 @@ func (b *Broker) Subscribe(sessionID string) (chan SSEEvent, func()) {
 	unsubscribe := func() {
 		b.mu.Lock()
 		defer b.mu.Unlock()
+		// Guard: if already removed (idempotent), skip drain+close.
+		// A deleted entry means the drain+close already occurred, and
+		// re-draining a closed channel would spin forever.
+		if _, ok := b.channels[sessionID][ch]; !ok {
+			return
+		}
 		delete(b.channels[sessionID], ch)
 		// Drain and close to prevent goroutine leak (S3-13)
 		for {
@@ -52,6 +58,10 @@ func (b *Broker) Subscribe(sessionID string) (chan SSEEvent, func()) {
 func (b *Broker) Publish(sessionID string, evt SSEEvent) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
+	// Holding RLock during iteration is safe because buffered channels with
+	// select+default never block — each send either succeeds or drops
+	// immediately. Subscribe/Unsubscribe may contend briefly on the write
+	// lock but the critical section is O(n) for n typically 1-10 subscribers.
 	subs := b.channels[sessionID]
 	for ch := range subs {
 		// S3-01: recover guard — channel might be closed between check and send

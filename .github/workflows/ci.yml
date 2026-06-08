@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  ci:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg15
+        env:
+          POSTGRES_USER: agentos
+          POSTGRES_PASSWORD: agentos123
+          POSTGRES_DB: agentos
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U agentos -d agentos"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      # Database
+      DATABASE_URL: postgres://agentos:agentos123@localhost:5432/agentos?sslmode=disable
+      # Redis
+      REDIS_URL: redis://localhost:6379/0
+      # Auth
+      JWT_SECRET: ci-dummy-jwt-secret-key-not-for-production
+      ADMIN_API_KEY: ci-dummy-admin-api-key
+      # Platform encryption (32 bytes hex = 64 hex chars)
+      PLATFORM_SECRET_ENCRYPTION_KEY: "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+      # Service URLs
+      PYTHON_SERVICE_URL: http://localhost:8000
+      # Environment
+      ENV: development
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ---- Go ----
+      - name: Setup Go 1.22
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Go build
+        working-directory: go-service
+        run: go build ./...
+
+      - name: Go test
+        working-directory: go-service
+        run: go test -race -count=1 ./...
+
+      # ---- Python ----
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install -r python-service/requirements.txt
+
+      - name: Python test
+        working-directory: python-service
+        run: python3 -m pytest tests/ -v --tb=short
+
+      # ---- Node (React) ----
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Node dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: React test
+        working-directory: web
+        run: NODE_OPTIONS="--experimental-require-module" npx vitest run
+
+      # ---- Docker build verification ----
+      - name: Build Go service Docker image
+        run: docker build -t agentos-go-service ./go-service
+
+      - name: Build Python service Docker image
+        run: docker build -t agentos-python-service ./python-service
