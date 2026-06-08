@@ -34,11 +34,7 @@ services:
     profiles: ["full"]
     image: ghcr.io/rayyen0902/agentos-python-service:latest
     ports:
-      - "8000:8000"
-    env_file:
-      - .env
-      - python-service/.env
-    depends_on:
+      - "8001:8000"
       postgres:
         condition: service_healthy
       redis:
