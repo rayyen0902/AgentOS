@@ -85,7 +85,7 @@ jobs:
       - name: Build web frontend
         working-directory: ./web
         run: |
-          npm ci
+          npm install
           npm run build
 
       # ── Step 5: Install sshpass ───────────────────────────
