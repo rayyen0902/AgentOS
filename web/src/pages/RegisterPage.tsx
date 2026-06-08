@@ -70,7 +70,36 @@ export function RegisterPage({ onSuccess }: Props) {
       setError('请填写所有字段');
       return;
     }
-    if (verify_code.length !== 6) {
+
+    // Phone validation: must be digits
+    if (!/^\d+$/.test(phone)) {
+      setError('手机号必须为纯数字');
+      return;
+    }
+    if (phone.length !== 11) {
+      setError('手机号必须为11位');
+      return;
+    }
+
+    // Password validation: PRD 8-32 chars, uppercase + lowercase + digit
+    if (password.length < 8 || password.length > 32) {
+      setError('密码长度需为 8-32 位');
+      return;
+    }
+    if (!/[A-Z]/.test(password)) {
+      setError('密码需包含大写字母');
+      return;
+    }
+    if (!/[a-z]/.test(password)) {
+      setError('密码需包含小写字母');
+      return;
+    }
+    if (!/[0-9]/.test(password)) {
+      setError('密码需包含数字');
+      return;
+    }
+
+    if (verify_code.length !== 6 || !/^\d{6}$/.test(verify_code)) {
       setError('验证码为 6 位数字');
       return;
     }

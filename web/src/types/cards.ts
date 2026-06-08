@@ -38,8 +38,10 @@ export interface SkinReportCardData {
 
 export interface InterruptCardData {
   question: string;
-  options: string[];
+  options: { label: string; value: string }[];
   timeout_s: number;
+  session_id: string;
+  interrupt_id: string;
 }
 
 export interface ScheduleStep {
@@ -66,3 +68,10 @@ export type CardDataMap = {
   interrupt_card: InterruptCardData;
   schedule_card: ScheduleCardData;
 };
+
+export function isCardType<T extends keyof CardDataMap>(
+  cardType: string,
+  expected: T
+): cardType is T {
+  return cardType === expected;
+}

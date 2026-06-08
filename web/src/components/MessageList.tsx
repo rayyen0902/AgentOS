@@ -5,6 +5,7 @@ import { useEffect, useRef } from 'react';
 
 export function MessageList() {
   const messages = useChatStore((s) => s.messages);
+  const replyInterrupt = useChatStore((s) => s.replyInterrupt);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -20,12 +21,16 @@ export function MessageList() {
   }
 
   return (
-    <div className="message-list">
+    <div className="message-list" aria-live="polite">
       {messages.map((msg) =>
         msg.role === 'user' ? (
           <UserMessage key={msg.id} message={msg} />
         ) : (
-          <AIMessage key={msg.id} message={msg} />
+          <AIMessage
+            key={msg.id}
+            message={msg}
+            onInterruptReply={replyInterrupt}
+          />
         )
       )}
       <div ref={bottomRef} />

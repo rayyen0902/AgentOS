@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { DashboardMetric } from '../types/admin';
+import { adminFetch } from './api';
 import {
   LineChart,
   Line,
@@ -11,29 +12,52 @@ import {
   ResponsiveContainer,
 } from 'recharts';
 
+const POLL_INTERVAL = 30_000;
+
 export function AdminDashboard() {
   const [metrics, setMetrics] = useState<DashboardMetric | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const mountedRef = useRef(true);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
+    mountedRef.current = true;
+
     const fetchMetrics = async () => {
-      setLoading(true);
+      // Don't show full-page loading on refresh
+      if (!metrics) setLoading(true);
       try {
-        const res = await fetch('/api/v1/admin/dashboard/metrics');
+        const res = await adminFetch('/api/v1/admin/dashboard/metrics');
         const data = await res.json();
+        if (!mountedRef.current) return;
         if (data.code === 0) {
           setMetrics(data.data);
+          setError(null);
         } else {
           setError(data.message || '加载失败');
         }
       } catch {
-        setError('网络错误');
+        if (!mountedRef.current) return;
+        // Silent on poll; show error only on first load
+        if (!metrics) setError('网络错误');
       } finally {
-        setLoading(false);
+        if (mountedRef.current) setLoading(false);
       }
     };
-    fetchMetrics();
+
+    fetchMetrics(); // first load
+
+    pollRef.current = setInterval(fetchMetrics, POLL_INTERVAL);
+
+    return () => {
+      mountedRef.current = false;
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   if (loading) return <div className="admin-loading">加载中...</div>;
@@ -55,7 +79,12 @@ export function AdminDashboard() {
 
   return (
     <div className="admin-dashboard">
-      <h2>Agent 评价看板</h2>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <h2>Agent 评价看板</h2>
+        <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+          每 30s 自动刷新
+        </span>
+      </div>
       {error && (
         <div className="admin-error">
           <span>{error}</span>

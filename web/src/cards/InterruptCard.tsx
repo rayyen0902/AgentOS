@@ -8,46 +8,51 @@ interface Props {
 
 export function InterruptCard({ data, onReply }: Props) {
   const [remaining, setRemaining] = useState(data.timeout_s);
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const expiredRef = useRef(false);
+  const onReplyRef = useRef(onReply);
+  onReplyRef.current = onReply;
 
   const handleOption = useCallback(
-    (option: string) => {
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-        timerRef.current = null;
+    (value: string) => {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
       }
-      onReply(option);
+      onReplyRef.current(value);
     },
-    [onReply]
+    []
   );
 
   useEffect(() => {
     setRemaining(data.timeout_s);
     expiredRef.current = false;
 
-    timerRef.current = setInterval(() => {
+    intervalRef.current = setInterval(() => {
       setRemaining((prev) => {
         const next = prev - 1;
         if (next <= 0 && !expiredRef.current) {
           expiredRef.current = true;
-          if (timerRef.current) {
-            clearInterval(timerRef.current);
-            timerRef.current = null;
+          if (intervalRef.current) {
+            clearInterval(intervalRef.current);
+            intervalRef.current = null;
           }
-          onReply(data.options[0] || '');
+          // Use setTimeout to avoid setState-during-render
+          setTimeout(() => {
+            onReplyRef.current(data.options[0]?.value || '');
+          }, 0);
         }
         return next;
       });
     }, 1000);
 
     return () => {
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-        timerRef.current = null;
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
       }
     };
-  }, [data.timeout_s, data.options, onReply]);
+  }, [data.timeout_s, data.options]);
 
   const minutes = Math.floor(remaining / 60);
   const seconds = remaining % 60;
@@ -70,15 +75,15 @@ export function InterruptCard({ data, onReply }: Props) {
           <button
             key={i}
             className="interrupt-option-btn"
-            onClick={() => handleOption(opt)}
+            onClick={() => handleOption(opt.value)}
           >
-            {opt}
+            {opt.label}
           </button>
         ))}
       </div>
 
       <p className="interrupt-hint">
-        超时将自动选择"{data.options[0] || '默认选项'}"
+        超时将自动选择"{data.options[0]?.label || '默认选项'}"
       </p>
     </div>
   );

@@ -1,10 +1,14 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
+import { adminFetch } from './api';
 
 interface PlatformConfig {
   id: number;
   platform: string;
   name: string;
   app_id: string;
+  app_secret: string;
+  token: string;
+  encoding_aes_key: string;
   enabled: boolean;
   updated_at: string;
 }
@@ -16,12 +20,12 @@ export function AdminPlatforms() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<number | null>(null);
-  const [editForm, setEditForm] = useState({ app_id: '', enabled: true });
+  const [editForm, setEditForm] = useState({ app_id: '', app_secret: '', token: '', encoding_aes_key: '', enabled: true });
 
-  const fetchConfigs = async () => {
+  const fetchConfigs = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch('/api/v1/admin/platforms');
+      const res = await adminFetch('/api/v1/admin/platforms');
       const data = await res.json();
       if (data.code === 0) {
         setConfigs(data.data || []);
@@ -33,7 +37,7 @@ export function AdminPlatforms() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     fetchConfigs();
@@ -41,7 +45,7 @@ export function AdminPlatforms() {
 
   const startEdit = (cfg: PlatformConfig) => {
     setEditingId(cfg.id);
-    setEditForm({ app_id: cfg.app_id, enabled: cfg.enabled });
+    setEditForm({ app_id: cfg.app_id, app_secret: cfg.app_secret || '', token: cfg.token || '', encoding_aes_key: cfg.encoding_aes_key || '', enabled: cfg.enabled });
   };
 
   const cancelEdit = () => {
@@ -50,7 +54,7 @@ export function AdminPlatforms() {
 
   const saveEdit = async (id: number) => {
     try {
-      const res = await fetch(`/api/v1/admin/platforms/${id}`, {
+      const res = await adminFetch(`/api/v1/admin/platforms/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(editForm),
@@ -60,7 +64,7 @@ export function AdminPlatforms() {
         setConfigs((prev) =>
           prev.map((c) =>
             c.id === id
-              ? { ...c, app_id: editForm.app_id, enabled: editForm.enabled }
+              ? { ...c, app_id: editForm.app_id, app_secret: editForm.app_secret, token: editForm.token, encoding_aes_key: editForm.encoding_aes_key, enabled: editForm.enabled }
               : c
           )
         );

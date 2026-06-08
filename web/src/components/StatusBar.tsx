@@ -4,11 +4,12 @@ export function StatusBar() {
   const statusStream = useChatStore((s) => s.statusStream);
   const isProcessing = useChatStore((s) => s.isProcessing);
   const sseConnected = useChatStore((s) => s.sseConnected);
+  const errorEvent = useChatStore((s) => s.errorEvent);
 
   const sorted = [...statusStream].sort((a, b) => a.seq - b.seq);
 
   return (
-    <div className="status-bar">
+    <div className="status-bar" role="status" aria-live="polite">
       <div className="status-indicators">
         <span className={`status-dot ${sseConnected ? 'connected' : 'disconnected'}`} />
         <span className="status-label">
@@ -16,6 +17,11 @@ export function StatusBar() {
         </span>
         {isProcessing && <span className="status-processing">处理中...</span>}
       </div>
+      {errorEvent && (
+        <div className="status-error-banner">
+          [{errorEvent.code}] {errorEvent.message}
+        </div>
+      )}
       {sorted.length > 0 && (
         <div className="status-stream">
           {sorted.map((s) => (

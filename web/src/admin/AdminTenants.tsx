@@ -1,17 +1,19 @@
-import { useState, useEffect } from 'react';
-import { TenantInfo } from '../types/admin';
+import { useState, useEffect, useCallback } from 'react';
+import { TenantInfo, ApprovalResponse } from '../types/admin';
+import { adminFetch } from './api';
 
 export function AdminTenants() {
   const [tenants, setTenants] = useState<TenantInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedTenant, setSelectedTenant] = useState<TenantInfo | null>(null);
+  const [approvalResult, setApprovalResult] = useState<ApprovalResponse['data'] | null>(null);
 
-  const fetchTenants = async () => {
+  const fetchTenants = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch('/api/v1/admin/tenants');
+      const res = await adminFetch('/api/v1/admin/tenants');
       const data = await res.json();
       if (data.code === 0) {
         setTenants(data.data || []);
@@ -23,25 +25,24 @@ export function AdminTenants() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     fetchTenants();
-  }, []);
+  }, [fetchTenants]);
 
   const handleApprove = async (id: number) => {
     try {
-      const res = await fetch(`/api/v1/admin/tenants/${id}/approve`, {
+      const res = await adminFetch(`/api/v1/admin/tenants/${id}/approve`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
       });
-      const data = await res.json();
+      const data: ApprovalResponse = await res.json();
       if (data.code === 0) {
         setTenants((prev) =>
           prev.map((t) => (t.id === id ? { ...t, status: 'active' } : t))
         );
         if (data.data) {
-          alert(`API Key: ${data.data.api_key}`);
+          setApprovalResult(data.data);
         }
       } else {
         setError(data.message || '审批失败');
@@ -53,10 +54,8 @@ export function AdminTenants() {
 
   const handleReject = async (id: number) => {
     try {
-      const res = await fetch(`/api/v1/admin/tenants/${id}/approve`, {
+      const res = await adminFetch(`/api/v1/admin/tenants/${id}/reject`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'reject' }),
       });
       const data = await res.json();
       if (data.code === 0) {
@@ -163,7 +162,50 @@ export function AdminTenants() {
         </tbody>
       </table>
 
-      {selectedTenant && (
+      {/* API Key modal — shown once after approval */}
+      {approvalResult && (
+        <div className="modal-overlay" onClick={() => setApprovalResult(null)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <h3>审批通过 — 凭证信息（仅此一次）</h3>
+            <dl className="detail-list">
+              <dt>租户ID</dt><dd>{approvalResult.tenant_id}</dd>
+              <dt>状态</dt><dd>{approvalResult.status}</dd>
+              <dt>API Key</dt>
+              <dd className="mono-cell">
+                <code>{approvalResult.api_key}</code>
+              </dd>
+            </dl>
+            {approvalResult.widget_snippet && (
+              <div className="widget-snippet-display">
+                <label>嵌入代码</label>
+                <pre className="snippet-text">{approvalResult.widget_snippet}</pre>
+              </div>
+            )}
+            <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+              <button
+                className="btn-approve"
+                onClick={() => {
+                  navigator.clipboard.writeText(approvalResult.api_key || '').then(
+                    () => alert('API Key 已复制'),
+                    () => alert('复制失败')
+                  );
+                }}
+              >
+                复制 API Key
+              </button>
+              <button
+                className="modal-close-btn"
+                onClick={() => setApprovalResult(null)}
+              >
+                关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Tenant detail modal */}
+      {selectedTenant && !approvalResult && (
         <div className="modal-overlay" onClick={() => setSelectedTenant(null)}>
           <div className="modal-content" onClick={(e) => e.stopPropagation()}>
             <h3>租户详情</h3>

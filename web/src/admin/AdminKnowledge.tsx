@@ -1,4 +1,7 @@
-import { useState, useEffect, FormEvent } from 'react';
+import { useState, useEffect, FormEvent, useCallback } from 'react';
+import { adminFetch } from './api';
+
+const PAGE_SIZE = 15;
 
 interface Product {
   id: number;
@@ -24,13 +27,17 @@ export function AdminKnowledge() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchData = async () => {
+  // client-side pagination
+  const [prodPage, setProdPage] = useState(1);
+  const [conflictPage, setConflictPage] = useState(1);
+
+  const fetchData = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
       const [prodRes, conflRes] = await Promise.all([
-        fetch('/api/v1/admin/knowledge/products'),
-        fetch('/api/v1/admin/knowledge/conflicts'),
+        adminFetch('/api/v1/admin/knowledge/products'),
+        adminFetch('/api/v1/admin/knowledge/conflicts'),
       ]);
       const prodData = await prodRes.json();
       const conflData = await conflRes.json();
@@ -41,7 +48,7 @@ export function AdminKnowledge() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     fetchData();
@@ -66,7 +73,7 @@ export function AdminKnowledge() {
     e.preventDefault();
     setSubmitting(true);
     try {
-      const res = await fetch('/api/v1/admin/knowledge/products', {
+      const res = await adminFetch('/api/v1/admin/knowledge/products', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -92,7 +99,7 @@ export function AdminKnowledge() {
     e.preventDefault();
     setSubmitting(true);
     try {
-      const res = await fetch('/api/v1/admin/knowledge/conflicts', {
+      const res = await adminFetch('/api/v1/admin/knowledge/conflicts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(newConflict),
@@ -113,7 +120,7 @@ export function AdminKnowledge() {
 
   const deleteConflict = async (id: number) => {
     try {
-      const res = await fetch(`/api/v1/admin/knowledge/conflicts/${id}`, {
+      const res = await adminFetch(`/api/v1/admin/knowledge/conflicts/${id}`, {
         method: 'DELETE',
       });
       const data = await res.json();
@@ -127,6 +134,41 @@ export function AdminKnowledge() {
     }
   };
 
+  // Paginated slices
+  const prodTotalPages = Math.max(1, Math.ceil(products.length / PAGE_SIZE));
+  const prodSlice = products.slice((prodPage - 1) * PAGE_SIZE, prodPage * PAGE_SIZE);
+  const conflTotalPages = Math.max(1, Math.ceil(conflicts.length / PAGE_SIZE));
+  const conflSlice = conflicts.slice((conflictPage - 1) * PAGE_SIZE, conflictPage * PAGE_SIZE);
+
+  // Reset pagination on tab change
+  const onTabChange = (t: typeof tab) => {
+    setTab(t);
+    setProdPage(1);
+    setConflictPage(1);
+  };
+
+  const Pager = ({
+    page,
+    total,
+    onChange,
+  }: {
+    page: number;
+    total: number;
+    onChange: (p: number) => void;
+  }) => (
+    <div className="pager">
+      <button disabled={page <= 1} onClick={() => onChange(page - 1)}>
+        ‹ 上一页
+      </button>
+      <span>
+        {page} / {total}
+      </span>
+      <button disabled={page >= total} onClick={() => onChange(page + 1)}>
+        下一页 ›
+      </button>
+    </div>
+  );
+
   if (loading) return <div className="admin-loading">加载中...</div>;
 
   return (
@@ -139,35 +181,44 @@ export function AdminKnowledge() {
         </div>
       )}
 
-      <div className="knowledge-tabs">
+      <div className="knowledge-tabs" role="tablist">
         <button
+          role="tab"
+          aria-selected={tab === 'products'}
+          aria-controls="panel-products"
           className={`tab-btn ${tab === 'products' ? 'active' : ''}`}
-          onClick={() => setTab('products')}
+          onClick={() => onTabChange('products')}
         >
           产品录入
         </button>
         <button
+          role="tab"
+          aria-selected={tab === 'ingredients'}
+          aria-controls="panel-ingredients"
           className={`tab-btn ${tab === 'ingredients' ? 'active' : ''}`}
-          onClick={() => setTab('ingredients')}
+          onClick={() => onTabChange('ingredients')}
         >
           成分管理
         </button>
         <button
+          role="tab"
+          aria-selected={tab === 'conflicts'}
+          aria-controls="panel-conflicts"
           className={`tab-btn ${tab === 'conflicts' ? 'active' : ''}`}
-          onClick={() => setTab('conflicts')}
+          onClick={() => onTabChange('conflicts')}
         >
           冲突规则
         </button>
       </div>
 
       {tab === 'products' && (
-        <div className="knowledge-section">
+        <div className="knowledge-section" role="tabpanel" id="panel-products">
           <h3>产品录入</h3>
           <form className="knowledge-form" onSubmit={addProduct}>
             <label>名称 <input type="text" value={newProduct.name} onChange={(e) => setNewProduct((f) => ({ ...f, name: e.target.value }))} required /></label>
             <label>品牌 <input type="text" value={newProduct.brand} onChange={(e) => setNewProduct((f) => ({ ...f, brand: e.target.value }))} required /></label>
             <label>分类 <input type="text" value={newProduct.category} onChange={(e) => setNewProduct((f) => ({ ...f, category: e.target.value }))} required /></label>
-            <label>价格 <input type="number" value={newProduct.price || ''} onChange={(e) => setNewProduct((f) => ({ ...f, price: Number(e.target.value) }))} required /></label>
+            <label>价格 <input type="number" value={newProduct.price ?? ''} onChange={(e) => setNewProduct((f) => ({ ...f, price: Number(e.target.value) }))} required /></label>
             <label>成分（逗号分隔） <input type="text" value={newProduct.ingredients} onChange={(e) => setNewProduct((f) => ({ ...f, ingredients: e.target.value }))} /></label>
             <label>图片URL <input type="url" value={newProduct.image_url} onChange={(e) => setNewProduct((f) => ({ ...f, image_url: e.target.value }))} /></label>
             <button type="submit" disabled={submitting}>添加产品</button>
@@ -185,7 +236,7 @@ export function AdminKnowledge() {
               </tr>
             </thead>
             <tbody>
-              {products.map((p) => (
+              {prodSlice.map((p) => (
                 <tr key={p.id}>
                   <td>{p.id}</td>
                   <td>{p.name}</td>
@@ -201,13 +252,19 @@ export function AdminKnowledge() {
                   </td>
                 </tr>
               ))}
+              {prodSlice.length === 0 && (
+                <tr><td colSpan={6} className="empty-cell">暂无产品</td></tr>
+              )}
             </tbody>
           </table>
+          {products.length > PAGE_SIZE && (
+            <Pager page={prodPage} total={prodTotalPages} onChange={setProdPage} />
+          )}
         </div>
       )}
 
       {tab === 'ingredients' && (
-        <div className="knowledge-section">
+        <div className="knowledge-section" role="tabpanel" id="panel-ingredients">
           <h3>成分管理</h3>
           <p className="knowledge-hint">所有产品中使用的成分汇总（由产品录入自动更新）</p>
           <table className="admin-table">
@@ -228,7 +285,7 @@ export function AdminKnowledge() {
       )}
 
       {tab === 'conflicts' && (
-        <div className="knowledge-section">
+        <div className="knowledge-section" role="tabpanel" id="panel-conflicts">
           <h3>冲突规则</h3>
           <form className="knowledge-form" onSubmit={addConflict}>
             <label>成分A <input type="text" value={newConflict.ingredient_a} onChange={(e) => setNewConflict((f) => ({ ...f, ingredient_a: e.target.value }))} required /></label>
@@ -242,7 +299,7 @@ export function AdminKnowledge() {
               <tr><th>ID</th><th>成分A</th><th>成分B</th><th>原因</th><th>操作</th></tr>
             </thead>
             <tbody>
-              {conflicts.map((c) => (
+              {conflSlice.map((c) => (
                 <tr key={c.id}>
                   <td>{c.id}</td>
                   <td>{c.ingredient_a}</td>
@@ -255,8 +312,14 @@ export function AdminKnowledge() {
                   </td>
                 </tr>
               ))}
+              {conflSlice.length === 0 && (
+                <tr><td colSpan={5} className="empty-cell">暂无冲突规则</td></tr>
+              )}
             </tbody>
           </table>
+          {conflicts.length > PAGE_SIZE && (
+            <Pager page={conflictPage} total={conflTotalPages} onChange={setConflictPage} />
+          )}
         </div>
       )}
     </div>

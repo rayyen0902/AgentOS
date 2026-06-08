@@ -1,11 +1,11 @@
-import { CardPayload } from '../types/sse';
+import { TypedCard } from './narrowCard';
 import { WorkshopCard } from './WorkshopCard';
 import { SkinReportCard } from './SkinReportCard';
 import { InterruptCard } from './InterruptCard';
 import { ScheduleCard } from './ScheduleCard';
 
 interface Props {
-  card: CardPayload;
+  card: TypedCard;
   onInterruptReply?: (option: string) => void;
 }
 
@@ -13,29 +13,16 @@ export function CardRenderer({ card, onInterruptReply }: Props) {
   const defaultReply = (option: string) => {
     console.warn('InterruptCard reply not handled:', option);
   };
+  const reply = onInterruptReply || defaultReply;
 
   switch (card.card_type) {
     case 'workshop_card':
-      return <WorkshopCard data={card.data as any} />;
+      return <WorkshopCard data={card.data} />;
     case 'skin_report_card':
-      return <SkinReportCard data={card.data as any} />;
+      return <SkinReportCard data={card.data} />;
     case 'interrupt_card':
-      return (
-        <InterruptCard
-          data={card.data as any}
-          onReply={onInterruptReply || defaultReply}
-        />
-      );
+      return <InterruptCard data={card.data} onReply={reply} />;
     case 'schedule_card':
-      return <ScheduleCard data={card.data as any} />;
-    default:
-      return (
-        <div className="card card-fallback">
-          <div className="card-header">
-            <span className="card-type-badge">{card.card_type}</span>
-          </div>
-          <pre className="card-data">{JSON.stringify(card.data, null, 2)}</pre>
-        </div>
-      );
+      return <ScheduleCard data={card.data} />;
   }
 }

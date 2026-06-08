@@ -17,7 +17,10 @@ export function WorkshopCard({ data }: Props) {
             key={product.id}
             className="workshop-product"
             onClick={() => {
-              window.open(`/product/${product.id}`, '_blank');
+              // Product detail page not yet implemented; navigate to external link or placeholder
+              if (product.image_url) {
+                window.open(product.image_url, '_blank');
+              }
             }}
           >
             <img
@@ -25,6 +28,9 @@ export function WorkshopCard({ data }: Props) {
               src={product.image_url}
               alt={product.name}
               loading="lazy"
+              onError={(e) => {
+                (e.target as HTMLImageElement).src = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg"><rect fill="%230f3460" width="72" height="72"/><text fill="%23999" x="50%25" y="50%25" text-anchor="middle" dy=".3em" font-size="10">无图</text></svg>';
+              }}
             />
             <div className="product-info">
               <h4 className="product-name">{product.name}</h4>

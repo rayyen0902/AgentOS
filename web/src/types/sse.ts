@@ -4,6 +4,8 @@ export interface StatusEvent {
   status: string;
   label: string;
   session_id: string;
+  duration_ms?: number;
+  created_at?: string;
 }
 
 export interface ReplyEvent {
@@ -36,7 +38,7 @@ export interface DoneEvent {
 }
 
 export interface ErrorEvent {
-  code: string;
+  code: string | number;
   message: string;
   session_id: string;
 }

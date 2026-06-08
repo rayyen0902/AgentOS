@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useNavigate } from 'react-router-dom';
 import './App.css';
 import { ChatContainer } from './components/ChatContainer';
 import { RegisterPage } from './pages/RegisterPage';
@@ -9,25 +9,38 @@ import { AdminDashboard } from './admin/AdminDashboard';
 import { AdminSessions } from './admin/AdminSessions';
 import { AdminPlatforms } from './admin/AdminPlatforms';
 import { AdminKnowledge } from './admin/AdminKnowledge';
-import { useState } from 'react';
+import { useCallback } from 'react';
+
+function RegisterWithRedirect() {
+  const navigate = useNavigate();
+
+  const handleSuccess = useCallback(
+    (tenantId: number) => {
+      navigate(`/approval?tenant_id=${tenantId}`, { replace: true });
+    },
+    [navigate]
+  );
+
+  return <RegisterPage onSuccess={handleSuccess} />;
+}
+
+function WidgetPage() {
+  const tenantId = new URLSearchParams(window.location.search).get('tenant_id');
+  if (!tenantId) {
+    return <p>Error: tenant_id is required</p>;
+  }
+  // Widget iframe page — minimal chat interface for embedding
+  return <ChatContainer widgetMode tenantId={tenantId} />;
+}
 
 function App() {
-  const [registeredTenantId, setRegisteredTenantId] = useState<number | null>(null);
-
   return (
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<ChatContainer />} />
-        <Route
-          path="/register"
-          element={
-            registeredTenantId ? (
-              <ApprovalPage />
-            ) : (
-              <RegisterPage onSuccess={(id) => setRegisteredTenantId(id)} />
-            )
-          }
-        />
+        <Route path="/register" element={<RegisterWithRedirect />} />
+        <Route path="/approval" element={<ApprovalPage />} />
+        <Route path="/widget" element={<WidgetPage />} />
         <Route path="/admin" element={<AdminLayout />}>
           <Route index element={<Navigate to="/admin/dashboard" replace />} />
           <Route path="tenants" element={<AdminTenants />} />

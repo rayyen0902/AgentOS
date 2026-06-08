@@ -4,18 +4,32 @@ import { MessageList } from './MessageList';
 import { StatusBar } from './StatusBar';
 import { InterruptPanel } from './InterruptPanel';
 import { ChatInput } from './ChatInput';
-import { useEffect } from 'react';
+import { useState, useEffect } from 'react';
 
-const DEMO_SESSION_ID = 'demo-session';
+interface Props {
+  widgetMode?: boolean;
+  tenantId?: string;
+}
 
-export function ChatContainer() {
+export function ChatContainer({ widgetMode = false, tenantId: _tenantId }: Props) {
   const sseConnected = useChatStore((s) => s.sseConnected);
+  const [sessionId] = useState(() => {
+    const tid = _tenantId;
+    if (tid) return `widget-${tid}`;
+    return localStorage.getItem('session_id') || 'demo-session';
+  });
 
-  useSSE(DEMO_SESSION_ID);
+  useSSE(sessionId);
 
   useEffect(() => {
-    useChatStore.setState({ sseConnected: true });
-  }, []);
+    if (_tenantId) {
+      localStorage.setItem('session_id', sessionId);
+    }
+  }, [_tenantId, sessionId]);
+
+  // widgetMode 渲染简化版，Step 9 实现
+  void widgetMode;
+  void widgetMode;
 
   return (
     <div className="chat-container">

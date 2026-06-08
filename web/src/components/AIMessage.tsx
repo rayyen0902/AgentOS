@@ -1,5 +1,5 @@
 import { Message } from '../types/store';
-import { CardRenderer } from '../cards/CardRenderer';
+import { SafeCardRenderer } from '../cards/SafeCardRenderer';
 
 interface AIMessageProps {
   message: Message;
@@ -12,7 +12,7 @@ export function AIMessage({ message, onInterruptReply }: AIMessageProps) {
       <div className="message-bubble ai-bubble">
         {message.content && <p className="message-text">{message.content}</p>}
         {message.card && (
-          <CardRenderer
+          <SafeCardRenderer
             card={message.card}
             onInterruptReply={onInterruptReply}
           />

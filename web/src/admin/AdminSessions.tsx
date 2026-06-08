@@ -1,5 +1,6 @@
-import { useState, useEffect, FormEvent } from 'react';
+import { useState, useEffect, FormEvent, useCallback } from 'react';
 import { AdminSessionFilter } from '../types/admin';
+import { adminFetch } from './api';
 
 interface SessionLog {
   session_id: string;
@@ -17,7 +18,7 @@ export function AdminSessions() {
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<AdminSessionFilter>({});
 
-  const fetchSessions = async (f?: AdminSessionFilter) => {
+  const fetchSessions = useCallback(async (f?: AdminSessionFilter) => {
     setLoading(true);
     setError(null);
     try {
@@ -26,7 +27,7 @@ export function AdminSessions() {
       if (f?.start_time) params.set('start_time', f.start_time);
       if (f?.end_time) params.set('end_time', f.end_time);
 
-      const res = await fetch(`/api/v1/admin/sessions?${params.toString()}`);
+      const res = await adminFetch(`/api/v1/admin/sessions?${params.toString()}`);
       const data = await res.json();
       if (data.code === 0) {
         setSessions(data.data || []);
@@ -38,7 +39,7 @@ export function AdminSessions() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     fetchSessions();
@@ -68,7 +69,7 @@ export function AdminSessions() {
             onChange={(e) =>
               setFilter((f) => ({
                 ...f,
-                tenant_id: e.target.value ? Number(e.target.value) : undefined,
+                tenant_id: e.target.value && !isNaN(Number(e.target.value)) ? Number(e.target.value) : undefined,
               }))
             }
             placeholder="按租户ID筛选"

@@ -22,6 +22,8 @@ export interface ChatStore {
   setInterrupt: (req: InterruptRequest | null) => void;
   setCard: (card: CardPayload | null) => void;
   setErrorEvent: (err: ErrorEvent | null) => void;
+  startProcessing: () => void;
   finishProcessing: () => void;
+  clearRound: () => void;
   replyInterrupt: (option: string) => Promise<void>;
 }

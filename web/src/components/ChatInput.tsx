@@ -4,6 +4,7 @@ import { Message } from '../types/store';
 
 const MAX_MESSAGE_LENGTH = 2000;
 const MAX_IMAGE_SIZE = 10 * 1024 * 1024;
+const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
 
 export function ChatInput() {
   const [text, setText] = useState('');
@@ -11,38 +12,61 @@ export function ChatInput() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isProcessing = useChatStore((s) => s.isProcessing);
   const appendMessage = useChatStore((s) => s.appendMessage);
+  const startProcessing = useChatStore((s) => s.startProcessing);
 
-  const validate = (): boolean => {
-    if (text.length > MAX_MESSAGE_LENGTH) {
-      setError(`消息过长，已截断至${MAX_MESSAGE_LENGTH}字`);
-      setText(text.slice(0, MAX_MESSAGE_LENGTH));
-      return true;
+  // S4-12 / S4-18: validate正确分离截断和校验，截断时提示用户且阻止提交
+  const validate = (content: string): { valid: boolean; content: string; truncated: boolean } => {
+    if (content.length > MAX_MESSAGE_LENGTH) {
+      return { valid: false, content: content.slice(0, MAX_MESSAGE_LENGTH), truncated: true };
     }
-    setError(null);
-    return true;
+    return { valid: true, content, truncated: false };
   };
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     const trimmed = text.trim();
     if (!trimmed || isProcessing) return;
-    if (!validate()) return;
+
+    const { valid, content, truncated } = validate(trimmed);
+    if (truncated) {
+      setText(content);
+      setError(`消息过长，已截断至${MAX_MESSAGE_LENGTH}字`);
+      return;
+    }
+    if (!valid) {
+      setError('消息无效');
+      return;
+    }
+    setError(null);
 
     const userMsg: Message = {
       id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
       role: 'user',
-      content: trimmed,
+      content,
       timestamp: Date.now(),
     };
 
+    // S4-04: startProcessing 防止并发多发
+    startProcessing();
     appendMessage(userMsg);
     setText('');
 
+    const token = localStorage.getItem('jwt');
+    const body = {
+      session_id: localStorage.getItem('session_id') || 'demo-session',
+      type: 'text',
+      content,
+      image_url: null,
+      interrupt_reply: false,
+    };
     try {
-      const res = await fetch('/api/v1/chat/message', {
+      const res = await fetch(`${API_BASE}/api/v1/chat/message`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: trimmed }),
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify(body),
       });
 
       if (!res.ok) {
@@ -54,6 +78,7 @@ export function ChatInput() {
     }
   };
 
+  // S4-13: 图片上传接入消息体
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -64,6 +89,35 @@ export function ChatInput() {
     }
 
     setError(null);
+
+    // 图片消息直接发送
+    const userMsg: Message = {
+      id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+      role: 'user',
+      content: `[图片: ${file.name}]`,
+      timestamp: Date.now(),
+    };
+
+    startProcessing();
+    appendMessage(userMsg);
+
+    const formData = new FormData();
+    formData.append('image', file);
+    formData.append('session_id', localStorage.getItem('session_id') || 'demo-session');
+    formData.append('type', 'image');
+
+    const token = localStorage.getItem('jwt');
+    fetch('/api/v1/chat/message', {
+      method: 'POST',
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: formData,
+    }).then((res) => {
+      if (!res.ok) setError('图片发送失败');
+    }).catch(() => {
+      setError('网络错误，请检查连接');
+    });
   };
 
   return (

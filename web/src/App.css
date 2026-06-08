@@ -1406,3 +1406,33 @@ body {
     grid-template-columns: 1fr 1fr;
   }
 }
+
+/* ========== Pager ========== */
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 12px 0;
+  font-size: 13px;
+  color: var(--color-text-muted);
+}
+
+.pager button {
+  padding: 4px 12px;
+  background: var(--color-surface-alt);
+  border: 1px solid var(--color-border);
+  color: var(--color-text);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.pager button:hover:not(:disabled) {
+  border-color: var(--color-primary);
+}
+
+.pager button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
