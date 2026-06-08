@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/agentos/go-service/internal/middleware"
@@ -63,14 +65,19 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 		SessionID string `json:"session_id"`
 		Text      string `json:"text"`
 		Platform  string `json:"platform"`
-		UserID    int64  `json:"user_id"`
-		TenantID  int64  `json:"tenant_id"`
+		UserID    string `json:"user_id"`
+		TenantID  string `json:"tenant_id"`
 		ImageURL  string `json:"image_url,omitempty"`
 		ImageSize int64  `json:"image_size,omitempty"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Text == "" {
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		middleware.WriteJSON(w, model.CodeBadRequest,
-			model.NewErrorResponse(model.CodeBadRequest, "invalid request body", traceID))
+			model.NewErrorResponse(model.CodeBadRequest, fmt.Sprintf("invalid request body: %v", err), traceID))
+		return
+	}
+	if body.Text == "" {
+		middleware.WriteJSON(w, model.CodeBadRequest,
+			model.NewErrorResponse(model.CodeBadRequest, "text is required", traceID))
 		return
 	}
 
@@ -119,7 +126,9 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	if errors.Is(err, session.ErrSessionNotFound) || state == nil {
 		// Session not in Redis → create
-		state, err = h.Session.Create(ctx, body.SessionID, body.UserID, body.TenantID, body.Platform)
+		userID, _ := strconv.ParseInt(body.UserID, 10, 64)
+		tenantID, _ := strconv.ParseInt(body.TenantID, 10, 64)
+		state, err = h.Session.Create(ctx, body.SessionID, userID, tenantID, body.Platform)
 		if err != nil {
 			log.Printf("[ERROR] session create: %v", err)
 			middleware.WriteJSON(w, model.CodePythonDown,
