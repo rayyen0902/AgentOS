@@ -1,48 +1,38 @@
 # Step 7 消项清单
 
-> 你负责：企微 / 抖音 / 小红书 Webhook 适配器
+> 负责：企微 / 抖音 / 小红书 Webhook 适配器
+> GitHub Issue: #12, #20(部分)
 
 ---
 
-## #12 【Critical】企微 AES Key 未 base64 解码，Webhook 解密全乱码
+## 🔴 Critical — #12 (3 条)
 
-**文件**: `go-service/internal/platform/wecom.go`
-
-**位置**:
-- `HandleVerify` 行 67: echostr 解密
-- `HandleMessage` 行 118: 消息体解密
-- `aesEncrypt` 行 327: 加密
-
-**问题**: `EncodingAESKey` 是 43 字符 base64，代码 `[]byte(key+"=")` 直接当 AES bytes。base64 字符串字节 ≠ base64 解码后的密钥。
-
-**修复**: 
-```go
-keyBytes, err := base64.StdEncoding.DecodeString(cfg.EncodingAESKey + "=")
-if err != nil { return err }
-block, err := aes.NewCipher(keyBytes)  // ← 用解码后的 32 bytes
-```
+- [ ] **S7-01** `go-service/internal/platform/wecom.go:67` — `HandleVerify` echostr 解密: `[]byte(cfg.EncodingAESKey+"=")` 直接当 AES bytes，不解码 base64。改为 `base64.StdEncoding.DecodeString(key+"=")`
+- [ ] **S7-02** `go-service/internal/platform/wecom.go:118` — `HandleMessage` 消息体解密同上 bug
+- [ ] **S7-03** `go-service/internal/platform/wecom.go:327` — `aesEncrypt` 加密同上 bug
 
 ---
 
-## #20 部分归属 Step 7【High】抖音/小红书主动推送无 access_token
+## 🟠 High — #20(部分) (4 条)
 
-**文件**: 
-- `go-service/internal/platform/douyin.go`
-- `go-service/internal/platform/xhs.go`
-
-**修复**:
-1. **抖音**: 实现 `getAccessToken()` → 从 Redis `access_token:douyin:{app_id}` 读，过期自动刷新
-2. **小红书**: 同上，实现 token 管理
-3. 主动推送 API 调用加 `Authorization: Bearer <token>` 头
-4. 抖音 API URL 从 hardcode 改为配置读
+- [ ] **S7-04** `go-service/internal/platform/security.go:76` — `DefaultXHSVerifier` 硬编码返回 false 但代码继续处理。实现真实 RSA 签名验证
+- [ ] **S7-05** `go-service/internal/platform/douyin.go:166` — `pushTextMessage` 直接调 API URL 不带 access_token。实现 `getAccessToken()` + Redis `access_token:douyin:{app_id}` 缓存
+- [ ] **S7-06** `go-service/internal/platform/xhs.go:148` — `pushMessage` 同上，无 access_token。实现 token 管理 + `Authorization: Bearer <token>` 头
+- [ ] **S7-07** `go-service/internal/platform/wecom.go:180` — AgentID 硬编码 `1000002`。应读 `TenantPlatform` 配置
 
 ---
 
-## 关联：低优先级
+## 🟡 Medium (4 条)
 
-- `douyin.go` `pushTextMessage` 重试路径 resp.Body 未关闭——加 defer close
-- `xhs.go` `pushMessage` 同上
-- `wecom.go` 写死 `AgentID: 1000002` → 读 `TenantPlatform` 配置
-- `security.go:76` 小红书签名验证硬编码返回 false → 实现真实 RSA 签名验证
-- `manager.go` `incrementFailCount` 用 JSON Marshal/Unmarshal 计数 → 改用 Redis INCR
-- `manager.go` `sendAlert` goroutine 无错误上报——加告警日志
+- [ ] **S7-08** `go-service/internal/platform/douyin.go:168` — `pushTextMessage` 重试路径 resp.Body 未关闭。第一次 POST 失败的 response body 泄漏
+- [ ] **S7-09** `go-service/internal/platform/xhs.go` — `pushMessage` 同上 resp.Body 泄漏
+- [ ] **S7-10** `go-service/internal/platform/manager.go:190` — `incrementFailCount` 用 `json.Marshal/Unmarshal` 操作整数计数。改为 Redis `INCR`
+- [ ] **S7-11** `go-service/internal/platform/manager.go:219` — `sendAlert` goroutine 无错误上报。告警发送失败仅本地 log
+
+---
+
+## 🟢 Low (3 条)
+
+- [ ] **S7-12** `go-service/internal/platform/douyin.go:166` — API URL hardcode `https://open.douyin.com/im/send_msg/`。改为配置读取
+- [ ] **S7-13** `go-service/internal/platform/xhs.go:148` — API URL hardcode。同上改为配置读取
+- [ ] **S7-14** `go-service/internal/platform/wecom.go:247` — token 过期重试时 `context.Background()` 无超时。改为 `context.WithTimeout`

@@ -1,56 +1,42 @@
 # Step 8 消项清单
 
-> 你负责：Reflection Agent + Memory Consolidation + Human Escalation + Agent Journal + Evaluation
+> 负责：Reflection Agent + Memory Consolidation + Human Escalation + Agent Journal + Evaluation
+> GitHub Issue: #5(部分), #14, #16
 
 ---
 
-## #5 部分归属 Step 8【Critical】Reflection Agent 从未被触发
+## 🔴 Critical — #5(部分) (2 条)
 
-**你的部分**: 确保 `trigger_reflection_async()` 可用且被正确调用。
-
-**修复**:
-1. 确认 `reflection.py` 中 `trigger_reflection_async(session_ctx, agent_result)` 函数签名稳定
-2. 在 `reflection.py` 中补充 `Reflection` dataclass 定义（satisfaction/lesson/rule_candidate/should_escalate）
-3. **协调 Step 6**: 各 Agent（workshop/diagnosis/photo_analyst）需在 run() 末尾调用此函数
+- [ ] **S8-01** `python-service/app/agents/reflection.py` — `trigger_reflection_async()` 虽已定义，但需确保函数签名稳定供 Step 6 调用。确认参数: `(session_ctx, agent_result)`
+- [ ] **S8-02** `python-service/app/agents/reflection.py` — `Reflection` 返回类型 (dataclass) 从未在任何地方定义。定义: `satisfaction`/`lesson`/`rule_candidate`/`should_escalate`
 
 ---
 
-## #14 【High】Agent evaluation 四个指标全部忽略 agent_name
+## 🟠 High — #14, #16 (5 条)
 
-**文件**: `python-service/app/agents/evaluation.py`
-
-**问题**: `_calculate_accuracy` / `_calculate_conversion` / `_calculate_retention` / `_calculate_trust` 四个方法接受 `agent_name` 参数但在 SQL WHERE 中全不用。所有 Agent 得分一模一样。
-
-**修复**: 每个 SQL 查询加 `AND agent_name = $N` 过滤条件。
-
----
-
-## #16 【High】journal _get_week_range() 周日 00:00 取本周而非上周
-
-**文件**: `python-service/app/agents/journal.py:64`
-
-**问题**: 周日 00:00 UTC 触发时 `days_since_sunday = 0`，计算窗口 = 本周日 00:00 到当前(~2min)。
-
-**修复**: 
-```python
-days_since_sunday = now.weekday()
-if days_since_sunday == 0:  # 周日
-    days_since_sunday = 7   # 回溯到上周
-```
+- [ ] **S8-03** `python-service/app/agents/evaluation.py` — `_calculate_accuracy` SQL 查询所有 reflections 不按 agent_name 过滤
+- [ ] **S8-04** `python-service/app/agents/evaluation.py` — `_calculate_conversion` SQL 同上，不按 agent_name 过滤
+- [ ] **S8-05** `python-service/app/agents/evaluation.py` — `_calculate_retention` SQL 同上，不按 agent_name 过滤
+- [ ] **S8-06** `python-service/app/agents/evaluation.py` — `_calculate_trust` SQL 同上，不按 agent_name 过滤。四个方法接受参数但全不用→所有 Agent 得分一模一样
+- [ ] **S8-07** `python-service/app/agents/journal.py:64` — `_get_week_range()` 周日 00:00 触发时 `days_since_sunday=0`，窗口=本周日 00:00 到当前(~2min) 而非上周一整周。`days_since_sunday == 0` 时改为 7
 
 ---
 
-## 关联：中优先级
+## 🟡 Medium (5 条)
 
-| 文件 | 问题 | 修复 |
-|------|------|------|
-| `reflection.py:80` | 诊断条件检查 `state.phase`/`state.step`，实际存的是 `diagnosis_step` | 对齐字段名 |
-| `reflection.py:260` | audit log `agent_name` 写死 `"reflection"` | 改为实际 agent 名 |
-| `escalation.py:237` | `llm_verify_escalation` 错误时默认返回 True | 改为 LLM 不可用时仅规则匹配 |
-| `memory_consolidation.py` + `tools/consolidation.py` | 两套重复实现 | 合并到 agents/memory_consolidation.py |
+- [ ] **S8-08** `python-service/app/agents/reflection.py:80` — 诊断 Reflection 条件检查 `state.phase` / `state.step`。实际 diagnosis_agent 存的是 `diagnosis_step`，永不会匹配。对齐字段名
+- [ ] **S8-09** `python-service/app/agents/reflection.py:260` — audit log 的 `agent_name` 参数写死 `"reflection"` 而非实际 Agent 名。改为传入的 agent_name 变量
+- [ ] **S8-10** `python-service/app/agents/escalation.py:237` — `llm_verify_escalation` JSON 解析失败或 LLM 不可用时默认返回 True（确认升级）。LLM 临时故障导致误升级。改为 LLM 不可用时仅规则匹配
+- [ ] **S8-11** `python-service/app/agents/memory_consolidation.py` + `python-service/app/tools/consolidation.py` — 两套完全重复的 consolidation 实现。合并到 `agents/memory_consolidation.py`
+- [x] **S8-12** `python-service/app/agents/memory_consolidation.py:16` — 从 `fe_client` 直接 import 绕过 registry 层（无重试和 fallback）。改为走 registry。**⚠️ 二次修复: `check_semantic_similarity()` 第128行内部仍有 `from app.tools.fe_client import fe_retrieve`，绕过顶部 registry 导入。**
+- [x] **S8-17** `python-service/app/agents/memory_consolidation.py:190` — `await fe_ingest(ingest_input)` 变量 `ingest_input` 从未定义，运行必抛 NameError。补充 `FEIngestInput(...)` 构造。
+- [x] **S8-18** `python-service/app/agents/memory_consolidation.py:128` — `check_semantic_similarity()` 内部 `from app.tools.fe_client import fe_retrieve` 绕过 registry 层（无重试/fallback）。删除该行，复用顶部 `from app.tools.registry import fe_retrieve`。
 
 ---
 
-## 关联：基础设施
+## 🟢 Low (4 条)
 
-- **定时任务**: Agent Journal 的"每周日 00:00 UTC"需指定实现方式（建议 Python APScheduler 或系统 crontab 触发 API）
+- [ ] **S8-13** `python-service/app/agents/journal.py` — SQL INTERVAL 用字符串拼接 `$1 || ' days'`。改用 `make_interval(days => $1)`
+- [ ] **S8-14** `python-service/app/agents/evaluation.py:93` — INTERVAL 字符串拼接同上
+- [ ] **S8-15** `python-service/main.py:56` — `last_evaluation_day` 用 `now.day` 比较在跨月时逻辑脆弱
+- [ ] **S8-16** 定时任务基础设施 — Agent Journal "每周日 00:00 UTC" 未指定实现方式 (APScheduler? crontab?)。文档明确方案
