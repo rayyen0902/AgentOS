@@ -26,6 +26,14 @@ func Middleware(cfg *config.Config) func(http.Handler) http.Handler {
 				}
 			}
 
+			// S3-03: SSE endpoint supports query param token for EventSource compatibility.
+			if path == "/api/v1/chat/stream" {
+				tokenStr := r.URL.Query().Get("token")
+				if tokenStr != "" {
+					r.Header.Set("Authorization", "Bearer "+tokenStr)
+				}
+			}
+
 			// API Key for admin endpoints
 			if strings.HasPrefix(path, "/api/v1/admin/") {
 				key := r.Header.Get("X-API-Key")
@@ -42,13 +50,12 @@ func Middleware(cfg *config.Config) func(http.Handler) http.Handler {
 			}
 
 			// JWT auth for other endpoints
-			authHeader := r.Header.Get("Authorization")
-			if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+			tokenStr := extractToken(r)
+			if tokenStr == "" {
 				middleware.WriteJSON(w, model.CodeUnauthorized,
 					model.NewErrorResponse(model.CodeUnauthorized, "missing or invalid token", middleware.GetTraceID(r.Context())))
 				return
 			}
-			tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
 			claims := &jwt.RegisteredClaims{}
 			token, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (interface{}, error) {
 				return []byte(cfg.JWTSecret), nil
@@ -64,6 +71,17 @@ func Middleware(cfg *config.Config) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// extractToken gets the JWT from Authorization header or query param ?token=.
+func extractToken(r *http.Request) string {
+	// Header first
+	authHeader := r.Header.Get("Authorization")
+	if authHeader != "" && strings.HasPrefix(authHeader, "Bearer ") {
+		return strings.TrimPrefix(authHeader, "Bearer ")
+	}
+	// Fallback: query param (needed for EventSource SSE)
+	return r.URL.Query().Get("token")
 }
 
 // HMACSign computes HMAC-SHA256 hex signature.

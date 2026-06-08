@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/agentos/go-service/internal/middleware"
@@ -26,7 +27,6 @@ func NewXHSAdapter(mgr *Manager, forwardFn func(ctx context.Context, msg *Inboun
 }
 
 // HandleVerify processes GET URL verification (doc section 7C step 2).
-// Xiaohongshu sends GET with signature, timestamp, nonce, echostr using RSA verification.
 func (a *XHSAdapter) HandleVerify(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	traceID := middleware.GetTraceID(r.Context())
 
@@ -49,12 +49,12 @@ func (a *XHSAdapter) HandleVerify(w http.ResponseWriter, r *http.Request, tenant
 		return
 	}
 
-	// RSA signature verification using the XHS public key from config
-	// The app_id field stores the public key (or a reference to it)
+	// S7-04: Real RSA verification using the public key from config
+	// The app_id field stores the XHS public key (PEM format)
 	payload := params.Timestamp + "\n" + params.Nonce + "\n" + params.Echostr
-	if !DefaultXHSVerifier([]byte(payload), params.Signature, cfg.AppID) {
-		// Log but don't fail in dev mode — production should use official SDK
-		log.Printf("[XHS] WARNING: RSA verification skipped (official SDK needed) for tenant %d (trace=%s)", tenantID, traceID)
+	if !VerifyXHSRSA([]byte(payload), params.Signature, cfg.AppID) {
+		a.fail(w, r, fmt.Sprintf("%d", tenantID), "xhs", "RSA signature verification failed")
+		return
 	}
 
 	a.mgr.ResetFailCount(r.Context(), fmt.Sprintf("%d", tenantID), "xhs")
@@ -81,18 +81,17 @@ func (a *XHSAdapter) HandleMessage(w http.ResponseWriter, r *http.Request, tenan
 		return
 	}
 
-	// RSA signature verification on the raw body (doc section 7.2)
+	// RSA signature verification on the raw body
 	signature := r.Header.Get("X-XHS-Signature")
 	if signature == "" {
 		signature = r.URL.Query().Get("signature")
 	}
 
-	// Verify using XHS verifier
-	if !DefaultXHSVerifier(rawBody, signature, cfg.AppID) {
-		log.Printf("[XHS] WARNING: RSA verification skipped (official SDK needed) for tenant %d (trace=%s)", tenantID, traceID)
+	if !VerifyXHSRSA(rawBody, signature, cfg.AppID) {
+		a.fail(w, r, fmt.Sprintf("%d", tenantID), "xhs", "RSA signature verification failed")
+		return
 	}
 
-	// Parse webhook body
 	var xhsBody XHSWebhookBody
 	if err := json.Unmarshal(rawBody, &xhsBody); err != nil {
 		a.fail(w, r, fmt.Sprintf("%d", tenantID), "xhs", fmt.Sprintf("JSON parse: %v", err))
@@ -106,12 +105,10 @@ func (a *XHSAdapter) HandleMessage(w http.ResponseWriter, r *http.Request, tenan
 	log.Printf("[XHS] tenant %d user %s msg: type=%s content=%s (trace=%s)",
 		tenantID, xhsBody.FromUserID, xhsBody.MsgType, xhsBody.Content, traceID)
 
-	// Passive reply 200 OK
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"code":0,"message":"received"}`))
 
-	// Async goroutine for active push via 私信 API (doc section 7C)
 	go a.asyncActivePush(cfg, &xhsBody, normalized, traceID)
 }
 
@@ -130,10 +127,11 @@ func (a *XHSAdapter) asyncActivePush(cfg *TenantPlatform, body *XHSWebhookBody, 
 }
 
 // pushMessage sends a message via Xiaohongshu private message API (doc section 7C).
+// S7-06: Now uses access_token management with Bearer auth header.
 func (a *XHSAdapter) pushMessage(cfg *TenantPlatform, fromUserID, toUserID, text string) {
-	appSecret, err := a.mgr.DecryptAppSecret(cfg.AppSecretEncrypted)
+	accessToken, err := a.getAccessToken(cfg)
 	if err != nil {
-		log.Printf("[XHS] decrypt app_secret: %v", err)
+		log.Printf("[XHS] get access_token failed: %v", err)
 		return
 	}
 
@@ -144,32 +142,97 @@ func (a *XHSAdapter) pushMessage(cfg *TenantPlatform, fromUserID, toUserID, text
 	}
 
 	body, _ := json.Marshal(req)
-	// XHS private message API endpoint (placeholder — actual URL from XHS开放平台 docs)
-	apiURL := "https://open.xiaohongshu.com/api/im/send_msg"
 
-	resp, err := a.mgr.httpClient.Post(apiURL, "application/json", bytes.NewReader(body))
+	// S7-13: API URL from config or fallback
+	apiURL := cfg.WebhookURL
+	if apiURL == "" {
+		apiURL = "https://open.xiaohongshu.com/api/im/send_msg"
+	}
+
+	a.postWithRetry(apiURL, accessToken, body, 3)
+}
+
+// getAccessToken retrieves or refreshes XHS access_token (S7-06).
+func (a *XHSAdapter) getAccessToken(cfg *TenantPlatform) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cached, err := a.mgr.GetCachedAccessToken(ctx, "xhs", cfg.AppID)
+	if err == nil && cached != "" {
+		return cached, nil
+	}
+
+	appSecret, err := a.mgr.DecryptAppSecret(cfg.AppSecretEncrypted)
 	if err != nil {
-		log.Printf("[XHS] push error: %v", err)
-		for i := 0; i < 3; i++ {
-			time.Sleep(time.Duration(i+1) * 500 * time.Millisecond)
-			resp, err = a.mgr.httpClient.Post(apiURL, "application/json", bytes.NewReader(body))
-			if err == nil {
-				break
-			}
-			log.Printf("[XHS] retrying push (%d/3)", i+1)
+		return "", fmt.Errorf("decrypt app_secret: %w", err)
+	}
+
+	apiURL := fmt.Sprintf("https://open.xiaohongshu.com/oauth/access_token?app_id=%s&app_secret=%s&grant_type=client_credential",
+		url.QueryEscape(cfg.AppID), url.QueryEscape(appSecret))
+
+	resp, err := a.mgr.httpClient.Get(apiURL)
+	if err != nil {
+		return "", fmt.Errorf("xhs token request: %w", err)
+	}
+	defer func() {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
+
+	var result struct {
+		Data struct {
+			AccessToken string `json:"access_token"`
+			ExpiresIn   int    `json:"expires_in"`
+		} `json:"data"`
+		ErrorCode int    `json:"error_code"`
+		ErrorMsg  string `json:"error_msg"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("parse xhs token response: %w", err)
+	}
+	if result.ErrorCode != 0 {
+		return "", fmt.Errorf("xhs token error: code=%d msg=%s", result.ErrorCode, result.ErrorMsg)
+	}
+
+	if err := a.mgr.CacheAccessToken(ctx, "xhs", cfg.AppID, result.Data.AccessToken, result.Data.ExpiresIn); err != nil {
+		log.Printf("[XHS] cache access_token failed: %v", err)
+	}
+
+	return result.Data.AccessToken, nil
+}
+
+// postWithRetry sends a POST with bearer token and retry logic.
+// S7-09: Properly drains and closes response body on every path.
+func (a *XHSAdapter) postWithRetry(apiURL, accessToken string, body []byte, maxRetry int) {
+	for attempt := 0; attempt < maxRetry; attempt++ {
+		req, err := http.NewRequest("POST", apiURL, bytes.NewReader(body))
+		if err != nil {
+			log.Printf("[XHS] create request: %v", err)
+			return
 		}
-		return
-	}
-	defer resp.Body.Close()
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+accessToken)
 
-	if resp.StatusCode != 200 {
+		resp, err := a.mgr.httpClient.Do(req)
+		if err != nil {
+			log.Printf("[XHS] push error (attempt %d/%d): %v", attempt+1, maxRetry, err)
+			time.Sleep(time.Duration(attempt+1) * 500 * time.Millisecond)
+			continue
+		}
+
+		// S7-09: drain and close on EVERY path
 		respBody, _ := io.ReadAll(resp.Body)
-		log.Printf("[XHS] push failed: status=%d body=%s", resp.StatusCode, string(respBody))
-		return
-	}
+		resp.Body.Close()
 
-	log.Printf("[XHS] push OK to user %s", toUserID)
-	_ = appSecret
+		if resp.StatusCode == 200 {
+			log.Printf("[XHS] push OK to user (attempt %d)", attempt+1)
+			return
+		}
+
+		log.Printf("[XHS] push failed (attempt %d/%d): status=%d body=%s",
+			attempt+1, maxRetry, resp.StatusCode, string(respBody))
+		time.Sleep(time.Duration(attempt+1) * 500 * time.Millisecond)
+	}
 }
 
 func (a *XHSAdapter) fail(w http.ResponseWriter, r *http.Request, tenantID, platform, reason string) {

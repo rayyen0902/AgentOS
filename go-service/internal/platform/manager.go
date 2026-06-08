@@ -21,16 +21,14 @@ import (
 )
 
 // Manager handles platform configuration CRUD and token caching.
-// Uses tenant_platforms table in PostgreSQL and Redis for AccessToken caching.
 type Manager struct {
 	db              *sql.DB
 	redis           *redisutil.Client
-	encryptionKey   []byte // AES-256 key for app_secret encryption
+	encryptionKey   []byte
 	alertWebhookURL string
 	httpClient      *http.Client
 }
 
-// NewManager creates a new platform Manager.
 func NewManager(db *sql.DB, redis *redisutil.Client, encryptionKey, alertWebhookURL string) *Manager {
 	return &Manager{
 		db:              db,
@@ -44,24 +42,32 @@ func NewManager(db *sql.DB, redis *redisutil.Client, encryptionKey, alertWebhook
 // --- tenant_platforms CRUD (doc section 7.5) ---
 
 // GetPlatformConfig retrieves platform configuration by tenant_id and platform type.
+// S7-07: Queries wecom_agent_id column; default fallback 1000002.
 func (m *Manager) GetPlatformConfig(ctx context.Context, tenantID int64, platform string) (*TenantPlatform, error) {
 	var tp TenantPlatform
 	var createdAt time.Time
+	var wecomAgentID sql.NullInt64
 	err := m.db.QueryRowContext(ctx, `
 		SELECT id, tenant_id, platform, app_id, app_secret_hash, app_secret_encrypted,
-		       COALESCE(token, ''), COALESCE(encoding_aes_key, ''), COALESCE(webhook_url, ''), status, created_at
+		       COALESCE(token, ''), COALESCE(encoding_aes_key, ''),
+		       COALESCE(wecom_agent_id, 0), COALESCE(webhook_url, ''), status, created_at
 		FROM tenant_platforms
 		WHERE tenant_id = $1 AND platform = $2 AND status = 'active'
 		LIMIT 1`, tenantID, platform).Scan(
 		&tp.ID, &tp.TenantID, &tp.Platform, &tp.AppID,
 		&tp.AppSecretHash, &tp.AppSecretEncrypted,
-		&tp.Token, &tp.EncodingAESKey, &tp.WebhookURL, &tp.Status, &createdAt,
+		&tp.Token, &tp.EncodingAESKey,
+		&wecomAgentID, &tp.WebhookURL, &tp.Status, &createdAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("platform config not found: tenant=%d platform=%s", tenantID, platform)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("query tenant_platforms: %w", err)
+	}
+	tp.WeComAgentID = int(wecomAgentID.Int64)
+	if tp.WeComAgentID == 0 {
+		tp.WeComAgentID = 1000002
 	}
 	tp.CreatedAt = createdAt
 	return &tp, nil
@@ -73,32 +79,27 @@ func (m *Manager) DecryptAppSecret(encryptedBase64 string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("base64 decode: %w", err)
 	}
-
 	block, err := aes.NewCipher(m.encryptionKey)
 	if err != nil {
 		return "", fmt.Errorf("aes new cipher: %w", err)
 	}
-
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
 		return "", fmt.Errorf("gcm: %w", err)
 	}
-
 	nonceSize := gcm.NonceSize()
 	if len(ciphertext) < nonceSize {
 		return "", fmt.Errorf("ciphertext too short")
 	}
-
 	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
 	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
 	if err != nil {
 		return "", fmt.Errorf("decrypt: %w", err)
 	}
-
 	return string(plaintext), nil
 }
 
-// ComputeAppSecretHash returns the SHA-256 hex hash of a secret (used for verification comparison).
+// ComputeAppSecretHash returns the SHA-256 hex hash of a secret.
 func ComputeAppSecretHash(secret string) string {
 	h := sha256.Sum256([]byte(secret))
 	return hex.EncodeToString(h[:])
@@ -110,32 +111,27 @@ func (m *Manager) EncryptAppSecret(secret string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("aes new cipher: %w", err)
 	}
-
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
 		return "", fmt.Errorf("gcm: %w", err)
 	}
-
 	nonce := make([]byte, gcm.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return "", fmt.Errorf("generate nonce: %w", err)
 	}
-
 	ciphertext := gcm.Seal(nonce, nonce, []byte(secret), nil)
 	return base64.StdEncoding.EncodeToString(ciphertext), nil
 }
 
 // --- AccessToken caching (doc section 7A: Redis TTL = expires_in - 60s) ---
 
-const accessTokenKeyPrefix = "access_token:%s:%s" // access_token:platform:id
+const accessTokenKeyPrefix = "access_token:%s:%s"
 
-// GetCachedAccessToken retrieves cached access_token from Redis.
 func (m *Manager) GetCachedAccessToken(ctx context.Context, platform, appID string) (string, error) {
 	key := fmt.Sprintf(accessTokenKeyPrefix, platform, appID)
 	return m.redis.Get(ctx, key)
 }
 
-// CacheAccessToken stores access_token in Redis with TTL = expiresIn - 60s.
 func (m *Manager) CacheAccessToken(ctx context.Context, platform, appID, token string, expiresIn int) error {
 	key := fmt.Sprintf(accessTokenKeyPrefix, platform, appID)
 	ttl := time.Duration(expiresIn-60) * time.Second
@@ -147,7 +143,6 @@ func (m *Manager) CacheAccessToken(ctx context.Context, platform, appID, token s
 
 // --- Security logging and alerting (doc section 7.2) ---
 
-// SecurityLogEntry is logged when webhook verification fails.
 type SecurityLogEntry struct {
 	TenantID string `json:"tenant_id"`
 	Platform string `json:"platform"`
@@ -156,7 +151,6 @@ type SecurityLogEntry struct {
 	Time     string `json:"time"`
 }
 
-// LogSecurityFailure logs a webhook verification failure.
 func (m *Manager) LogSecurityFailure(ctx context.Context, tenantID, platform, ip, reason string) {
 	entry := SecurityLogEntry{
 		TenantID: tenantID,
@@ -168,7 +162,6 @@ func (m *Manager) LogSecurityFailure(ctx context.Context, tenantID, platform, ip
 	data, _ := json.Marshal(entry)
 	log.Printf("[SECURITY] %s", string(data))
 
-	// Check consecutive failures and trigger alert if >= 10 (doc section 7.2)
 	count, err := m.incrementFailCount(ctx, tenantID, platform)
 	if err != nil {
 		log.Printf("[SECURITY] failed to increment fail count: %v", err)
@@ -179,27 +172,20 @@ func (m *Manager) LogSecurityFailure(ctx context.Context, tenantID, platform, ip
 	}
 }
 
-// consecutiveFailKey returns the Redis key for tracking consecutive verification failures.
 func consecutiveFailKey(tenantID, platform string) string {
 	return fmt.Sprintf("webhook_fail:%s:%s", tenantID, platform)
 }
 
 func (m *Manager) incrementFailCount(ctx context.Context, tenantID, platform string) (int64, error) {
 	key := consecutiveFailKey(tenantID, platform)
-	// Use a simplified approach: store count as a JSON number in Redis
-	var count int64
-	data, err := m.redis.Get(ctx, key)
-	if err == nil && data != "" {
-		json.Unmarshal([]byte(data), &count)
+	count, err := m.redis.Incr(ctx, key)
+	if err != nil {
+		return 0, fmt.Errorf("redis INCR: %w", err)
 	}
-	count++
-	if err := m.redis.Set(ctx, key, count, 10*time.Minute); err != nil {
-		return 0, err
-	}
+	m.redis.Expire(ctx, key, 10*time.Minute)
 	return count, nil
 }
 
-// ResetFailCount resets the consecutive failure counter on successful verification.
 func (m *Manager) ResetFailCount(ctx context.Context, tenantID, platform string) {
 	key := consecutiveFailKey(tenantID, platform)
 	m.redis.Delete(ctx, key)
@@ -207,6 +193,8 @@ func (m *Manager) ResetFailCount(ctx context.Context, tenantID, platform string)
 
 func (m *Manager) sendAlert(ctx context.Context, entry SecurityLogEntry, count int64) {
 	if m.alertWebhookURL == "" {
+		log.Printf("[ALERT] WARNING: alert_webhook_url not configured (count=%d tenant=%s platform=%s)",
+			count, entry.TenantID, entry.Platform)
 		return
 	}
 	payload := map[string]interface{}{
@@ -216,14 +204,32 @@ func (m *Manager) sendAlert(ctx context.Context, entry SecurityLogEntry, count i
 		"entry":         entry,
 	}
 	data, _ := json.Marshal(payload)
-	go func() {
-		resp, err := m.httpClient.Post(m.alertWebhookURL, "application/json",
-			bytes.NewReader(data))
-		if err != nil {
-			log.Printf("[ALERT] failed to send alert: %v", err)
-			return
-		}
-		resp.Body.Close()
-		log.Printf("[ALERT] sent webhook security alert: count=%d tenant=%s platform=%s", count, entry.TenantID, entry.Platform)
-	}()
+
+	alertCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(alertCtx, "POST", m.alertWebhookURL, bytes.NewReader(data))
+	if err != nil {
+		log.Printf(`[ALERT] ERROR: create request failed: %v | count=%d tenant=%s platform=%s`,
+			err, count, entry.TenantID, entry.Platform)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := m.httpClient.Do(req)
+	if err != nil {
+		log.Printf(`[ALERT] ERROR: send failed: %v | count=%d tenant=%s platform=%s`,
+			err, count, entry.TenantID, entry.Platform)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		log.Printf(`[ALERT] ERROR: server returned %d | count=%d tenant=%s platform=%s`,
+			resp.StatusCode, count, entry.TenantID, entry.Platform)
+		return
+	}
+
+	log.Printf(`[ALERT] sent webhook security alert OK: count=%d tenant=%s platform=%s`,
+		count, entry.TenantID, entry.Platform)
 }

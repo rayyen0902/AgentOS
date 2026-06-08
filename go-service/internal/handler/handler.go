@@ -195,7 +195,7 @@ func (h *Handler) handleResume(ctx context.Context, sessionID string, reply stri
 		"agent_state":     agentStateJSON,
 	}
 
-	return h.forwardResumeToPython(nil, reqBody)
+	return h.forwardResumeToPython(ctx, reqBody)
 }
 
 // updateSessionFromResponse updates Redis session state from Python response
@@ -271,7 +271,11 @@ func serializeAgentState(state interface{}) map[string]interface{} {
 			return map[string]interface{}{}
 		}
 		var result map[string]interface{}
-		json.Unmarshal(b, &result)
+		// S3-15: don't silently discard unmarshal error
+		if err := json.Unmarshal(b, &result); err != nil {
+			log.Printf("[WARN] serializeAgentState unmarshal failed: %v", err)
+			return map[string]interface{}{}
+		}
 		return result
 	}
 }

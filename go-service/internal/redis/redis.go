@@ -90,6 +90,11 @@ func (c *Client) Unlock(ctx context.Context, lockKey string) error {
 	return c.rdb.Del(ctx, c.buildKey(lockKey)).Err()
 }
 
+// Incr atomically increments the counter at key and returns the new value.
+func (c *Client) Incr(ctx context.Context, key string) (int64, error) {
+	return c.rdb.Incr(ctx, c.buildKey(key)).Result()
+}
+
 func (c *Client) IsAvailable() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()

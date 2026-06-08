@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/agentos/go-service/internal/config"
 	"github.com/agentos/go-service/internal/middleware"
@@ -20,14 +21,14 @@ import (
 )
 
 type Handler struct {
-	Config     *config.Config
-	Session    *session.Manager
-	SSEBroker  *sse.Broker
-	Redis      *redisutil.Client
+	Config      *config.Config
+	Session     *session.Manager
+	SSEBroker   *sse.Broker
+	Redis       *redisutil.Client
 	PlatformMgr *platform.Manager
-	WeCom      *platform.WeComAdapter
-	Douyin     *platform.DouyinAdapter
-	XHS        *platform.XHSAdapter
+	WeCom       *platform.WeComAdapter
+	Douyin      *platform.DouyinAdapter
+	XHS         *platform.XHSAdapter
 }
 
 func New(cfg *config.Config, sm *session.Manager, broker *sse.Broker, redis *redisutil.Client) *Handler {
@@ -57,98 +58,17 @@ func NewWithPlatforms(cfg *config.Config, sm *session.Manager, broker *sse.Broke
 	return h
 }
 
-// forwardToPython sends a simple request to Python /agent/run.
-func (h *Handler) forwardToPython(r *http.Request, sessionID, text, platform string) (string, error) {
-	body := map[string]interface{}{
-		"session_id": sessionID,
-		"text":       text,
-		"platform":   platform,
-	}
-	payload, _ := json.Marshal(body)
-
-	client := &http.Client{Timeout: h.Config.PythonServiceTimeout}
-	resp, err := client.Post(
-		strings.TrimRight(h.Config.PythonServiceURL, "/")+"/agent/run",
-		"application/json",
-		bytes.NewReader(payload),
-	)
-	if err != nil {
-		return "", fmt.Errorf("python request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("read python response: %w", err)
-	}
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("python returned %d: %s", resp.StatusCode, string(respBody))
-	}
-	return string(respBody), nil
-}
-
-// forwardNormalized sends a normalized InboundMessage to Python /agent/run.
-// This is the callback used by platform adapters.
-func (h *Handler) forwardNormalized(ctx context.Context, msg *platform.InboundMessage) (string, error) {
-	body := map[string]interface{}{
-		"session_id":  msg.SessionID,
-		"user_id":     msg.UserID,
-		"tenant_id":   msg.TenantID,
-		"platform":    msg.Platform,
-		"message":     msg.Message,
-		"agent_state": msg.AgentState,
-	}
-	payload, _ := json.Marshal(body)
-
-	client := &http.Client{Timeout: h.Config.PythonServiceTimeout}
-	resp, err := client.Post(
-		strings.TrimRight(h.Config.PythonServiceURL, "/")+"/agent/run",
-		"application/json",
-		bytes.NewReader(payload),
-	)
-	if err != nil {
-		return "", fmt.Errorf("python request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("read python response: %w", err)
-	}
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("python returned %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	// Extract the reply text from Python's response
-	var result map[string]interface{}
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return string(respBody), nil // Return raw if not JSON
-	}
-
-	// Try to get text content from the agent reply
-	if data, ok := result["data"].(map[string]interface{}); ok {
-		if reply, ok := data["reply"].(string); ok && reply != "" {
-			return reply, nil
-		}
-		if messages, ok := data["messages"].([]interface{}); ok && len(messages) > 0 {
-			if lastMsg, ok := messages[len(messages)-1].(map[string]interface{}); ok {
-				if content, ok := lastMsg["content"].(string); ok {
-					return content, nil
-				}
-			}
-		}
-	}
-
-	return string(respBody), nil
-}
-
-// forwardToPythonV2 sends the full Step-6-compliant request to Python /agent/run
-func (h *Handler) forwardToPythonV2(r *http.Request, reqBody map[string]interface{}) (map[string]interface{}, error) {
+// pythonRequest is the shared low-level HTTP call for all Go→Python forwarding paths.
+// S3-14: single implementation replaces 4 duplicate functions.
+func (h *Handler) pythonRequest(endpoint string, reqBody interface{}, timeout time.Duration) (map[string]interface{}, error) {
 	payload, _ := json.Marshal(reqBody)
+	if timeout <= 0 {
+		timeout = h.Config.PythonServiceTimeout
+	}
 
-	client := &http.Client{Timeout: h.Config.PythonServiceTimeout}
+	client := &http.Client{Timeout: timeout}
 	resp, err := client.Post(
-		strings.TrimRight(h.Config.PythonServiceURL, "/")+"/agent/run",
+		strings.TrimRight(h.Config.PythonServiceURL, "/")+endpoint,
 		"application/json",
 		bytes.NewReader(payload),
 	)
@@ -172,34 +92,65 @@ func (h *Handler) forwardToPythonV2(r *http.Request, reqBody map[string]interfac
 	return result, nil
 }
 
-// forwardResumeToPython sends a resume request to Python /agent/resume
-func (h *Handler) forwardResumeToPython(r *http.Request, reqBody map[string]interface{}) (map[string]interface{}, error) {
-	payload, _ := json.Marshal(reqBody)
-
-	client := &http.Client{Timeout: h.Config.PythonServiceTimeout}
-	resp, err := client.Post(
-		strings.TrimRight(h.Config.PythonServiceURL, "/")+"/agent/resume",
-		"application/json",
-		bytes.NewReader(payload),
-	)
+// forwardToPython sends a simple request to Python /agent/run. Returns raw string for legacy callers.
+func (h *Handler) forwardToPython(r *http.Request, sessionID, text, platformName string) (string, error) {
+	body := map[string]interface{}{
+		"session_id": sessionID,
+		"text":       text,
+		"platform":   platformName,
+	}
+	result, err := h.pythonRequest("/agent/run", body, 0)
 	if err != nil {
-		return nil, fmt.Errorf("python resume request failed: %w", err)
+		return "", err
 	}
-	defer resp.Body.Close()
+	b, _ := json.Marshal(result)
+	return string(b), nil
+}
 
-	respBody, err := io.ReadAll(resp.Body)
+// forwardNormalized sends a normalized InboundMessage to Python /agent/run.
+// S3-02: Returns the full Python response (events array + data) instead of just reply text.
+// The platform adapter uses this to extract card/interrupt/status events for active push.
+func (h *Handler) forwardNormalized(ctx context.Context, msg *platform.InboundMessage) (string, error) {
+	result, err := h.pythonRequest("/agent/run", map[string]interface{}{
+		"session_id":  msg.SessionID,
+		"user_id":     msg.UserID,
+		"tenant_id":   msg.TenantID,
+		"platform":    msg.Platform,
+		"message":     msg.Message,
+		"agent_state": msg.AgentState,
+	}, 0)
 	if err != nil {
-		return nil, fmt.Errorf("read python resume response: %w", err)
-	}
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("python resume returned %d: %s", resp.StatusCode, string(respBody))
+		return "", err
 	}
 
-	var result map[string]interface{}
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return nil, fmt.Errorf("parse python resume response: %w", err)
+	// S3-02: Write card/interrupt/status events to SSE Broker so platform adapters
+	// only need to handle active push; SSE subscribers get full event stream.
+	if data, ok := result["data"].(map[string]interface{}); ok {
+		if events, ok := data["events"].([]interface{}); ok {
+			for _, e := range events {
+				if evtMap, ok := e.(map[string]interface{}); ok {
+					evtType, _ := evtMap["type"].(string)
+					evtData := evtMap["data"]
+					h.SSEBroker.Publish(msg.SessionID, sse.SSEEvent{Event: evtType, Data: evtData})
+				}
+			}
+		}
 	}
-	return result, nil
+
+	// Return full JSON for adapter to parse
+	b, _ := json.Marshal(result)
+	return string(b), nil
+}
+
+// forwardToPythonV2 sends the full Step-6-compliant request to Python /agent/run.
+func (h *Handler) forwardToPythonV2(r *http.Request, reqBody map[string]interface{}) (map[string]interface{}, error) {
+	return h.pythonRequest("/agent/run", reqBody, 0)
+}
+
+// forwardResumeToPython sends a resume request to Python /agent/resume.
+// S3-17: Accept context.Context instead of *http.Request for trace preservation.
+func (h *Handler) forwardResumeToPython(ctx context.Context, reqBody map[string]interface{}) (map[string]interface{}, error) {
+	return h.pythonRequest("/agent/resume", reqBody, 0)
 }
 
 // --- Webhook dispatch (Step 7 platform adapters) ---

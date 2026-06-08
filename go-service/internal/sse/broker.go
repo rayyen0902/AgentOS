@@ -36,7 +36,15 @@ func (b *Broker) Subscribe(sessionID string) (chan SSEEvent, func()) {
 		b.mu.Lock()
 		defer b.mu.Unlock()
 		delete(b.channels[sessionID], ch)
-		close(ch)
+		// Drain and close to prevent goroutine leak (S3-13)
+		for {
+			select {
+			case <-ch:
+			default:
+				close(ch)
+				return
+			}
+		}
 	}
 	return ch, unsubscribe
 }
@@ -46,10 +54,14 @@ func (b *Broker) Publish(sessionID string, evt SSEEvent) {
 	defer b.mu.RUnlock()
 	subs := b.channels[sessionID]
 	for ch := range subs {
-		select {
-		case ch <- evt:
-		default:
-		}
+		// S3-01: recover guard — channel might be closed between check and send
+		func() {
+			defer func() { recover() }()
+			select {
+			case ch <- evt:
+			default:
+			}
+		}()
 	}
 }
 

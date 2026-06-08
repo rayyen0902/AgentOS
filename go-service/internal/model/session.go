@@ -22,10 +22,12 @@ type InterruptRequest struct {
 }
 
 type StatusEvent struct {
-	Seq    int    `json:"seq"`
-	Source string `json:"source"`
-	Status string `json:"status"`
-	Label  string `json:"label"`
+	Seq        int       `json:"seq"`
+	Source     string    `json:"source"`
+	Status     string    `json:"status"`
+	Label      string    `json:"label"`
+	DurationMs int       `json:"duration_ms"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 type SessionState struct {

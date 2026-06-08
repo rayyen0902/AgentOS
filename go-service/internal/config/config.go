@@ -1,7 +1,9 @@
 package config
 
 import (
+	"encoding/hex"
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"time"
@@ -73,6 +75,15 @@ func (c *Config) validate() error {
 	if c.PlatformSecretEncryptionKey == "" {
 		return fmt.Errorf("PLATFORM_SECRET_ENCRYPTION_KEY is required")
 	}
+	// S1-08: AES-256 要求 key 32 bytes（支持 hex 编码 64-char 或 raw 32-byte）
+	keyBytes, err := hex.DecodeString(c.PlatformSecretEncryptionKey)
+	if err != nil {
+		// hex 解码失败→视为 raw bytes
+		keyBytes = []byte(c.PlatformSecretEncryptionKey)
+	}
+	if len(keyBytes) != 32 {
+		panic(fmt.Sprintf("PLATFORM_SECRET_ENCRYPTION_KEY must be a 32-byte AES-256 key (hex-encoded 64 chars or raw 32 bytes), got %d bytes", len(keyBytes)))
+	}
 	validEnvs := map[string]bool{"production": true, "staging": true, "development": true}
 	if !validEnvs[c.ENV] {
 		return fmt.Errorf("ENV must be one of production|staging|development, got: %s", c.ENV)
@@ -93,6 +104,7 @@ func getIntEnv(key string, defaultVal int) int {
 		if err == nil {
 			return n
 		}
+		log.Printf("[WARN] config: %s=%q cannot be parsed as int, using default %d: %v", key, v, defaultVal, err)
 	}
 	return defaultVal
 }
@@ -103,6 +115,7 @@ func getDurationEnv(key string, defaultVal time.Duration) time.Duration {
 		if err == nil {
 			return d
 		}
+		log.Printf("[WARN] config: %s=%q cannot be parsed as duration, using default %v: %v", key, v, defaultVal, err)
 	}
 	return defaultVal
 }

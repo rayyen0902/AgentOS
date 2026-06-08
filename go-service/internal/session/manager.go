@@ -40,7 +40,11 @@ func (m *Manager) Get(ctx context.Context, sessionID string) (*model.SessionStat
 
 func (m *Manager) Set(ctx context.Context, state *model.SessionState) error {
 	state.UpdatedAt = time.Now()
-	return m.redis.SetJSON(ctx, sessionKey(state.SessionID), state, defaultTTL)
+	ttl := defaultTTL
+	if state.TTLSeconds > 0 {
+		ttl = time.Duration(state.TTLSeconds) * time.Second
+	}
+	return m.redis.SetJSON(ctx, sessionKey(state.SessionID), state, ttl)
 }
 
 func (m *Manager) Delete(ctx context.Context, sessionID string) error {
@@ -83,14 +87,19 @@ func (m *Manager) ReleaseLock(ctx context.Context, sessionID string) error {
 	return m.redis.Unlock(ctx, agentLockKey(sessionID))
 }
 
-// PublishSSE writes an event to the SSE Redis Stream.
+// PublishSSE writes an event to the SSE Redis Stream and sets TTL 3600s per PRD 4.3.1.
 func (m *Manager) PublishSSE(ctx context.Context, sessionID string, eventType string, data interface{}) error {
 	payload, err := json.Marshal(data)
 	if err != nil {
 		return fmt.Errorf("marshal sse data: %w", err)
 	}
-	return m.redis.XAdd(ctx, sseChannelKey(sessionID), map[string]interface{}{
+	key := sseChannelKey(sessionID)
+	if err := m.redis.XAdd(ctx, key, map[string]interface{}{
 		"event": eventType,
 		"data":  string(payload),
-	})
+	}); err != nil {
+		return err
+	}
+	// S3-06: Ensure sse_channel stream has TTL 3600s
+	return m.redis.Expire(ctx, key, sseChannelTTL)
 }

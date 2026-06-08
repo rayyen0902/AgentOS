@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/agentos/go-service/internal/middleware"
@@ -26,7 +27,6 @@ func NewDouyinAdapter(mgr *Manager, forwardFn func(ctx context.Context, msg *Inb
 }
 
 // HandleVerify processes GET URL verification (doc section 7B step 2).
-// Douyin sends GET with signature, timestamp, nonce, echostr.
 func (a *DouyinAdapter) HandleVerify(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	traceID := middleware.GetTraceID(r.Context())
 
@@ -55,7 +55,6 @@ func (a *DouyinAdapter) HandleVerify(w http.ResponseWriter, r *http.Request, ten
 		return
 	}
 
-	// HMAC-SHA256 verification (doc section 7.2)
 	if !VerifyDouyinSignature(appSecret, params.Timestamp, params.Nonce, []byte(params.Echostr), params.Signature) {
 		a.fail(w, r, fmt.Sprintf("%d", tenantID), "douyin", "HMAC-SHA256 signature verification failed")
 		return
@@ -91,7 +90,6 @@ func (a *DouyinAdapter) HandleMessage(w http.ResponseWriter, r *http.Request, te
 		return
 	}
 
-	// Verify HMAC-SHA256 signature on the raw body (doc section 7.2)
 	signature := r.Header.Get("X-Douyin-Signature")
 	timestamp := r.Header.Get("X-Douyin-Timestamp")
 	nonce := r.Header.Get("X-Douyin-Nonce")
@@ -107,7 +105,6 @@ func (a *DouyinAdapter) HandleMessage(w http.ResponseWriter, r *http.Request, te
 		return
 	}
 
-	// Parse webhook body
 	var douyinBody DouyinWebhookBody
 	if err := json.Unmarshal(rawBody, &douyinBody); err != nil {
 		a.fail(w, r, fmt.Sprintf("%d", tenantID), "douyin", fmt.Sprintf("JSON parse: %v", err))
@@ -121,12 +118,10 @@ func (a *DouyinAdapter) HandleMessage(w http.ResponseWriter, r *http.Request, te
 	log.Printf("[DOUYIN] tenant %d user %s msg: type=%s content=%s (trace=%s)",
 		tenantID, douyinBody.FromUserID, douyinBody.MsgType, douyinBody.Content.Text, traceID)
 
-	// Passive reply 200 OK (doc section 7B)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"code":0,"message":"received"}`))
 
-	// Async goroutine for active push (doc section 7B)
 	go a.asyncActivePush(cfg, &douyinBody, normalized, traceID)
 }
 
@@ -141,16 +136,16 @@ func (a *DouyinAdapter) asyncActivePush(cfg *TenantPlatform, body *DouyinWebhook
 		return
 	}
 
-	// Douyin doesn't support cards; push as text (doc section 7B)
 	a.pushTextMessage(cfg, body.FromUserID, body.ToUserID, result)
 }
 
 // pushTextMessage sends a plain text message via Douyin active push API.
 // POST /im/send_msg/ (doc section 7B)
+// S7-05: Now uses access_token management instead of raw API call.
 func (a *DouyinAdapter) pushTextMessage(cfg *TenantPlatform, fromUserID, toUserID, text string) {
-	appSecret, err := a.mgr.DecryptAppSecret(cfg.AppSecretEncrypted)
+	accessToken, err := a.getAccessToken(cfg)
 	if err != nil {
-		log.Printf("[DOUYIN] decrypt app_secret: %v", err)
+		log.Printf("[DOUYIN] get access_token failed: %v", err)
 		return
 	}
 
@@ -163,37 +158,100 @@ func (a *DouyinAdapter) pushTextMessage(cfg *TenantPlatform, fromUserID, toUserI
 	}
 
 	body, _ := json.Marshal(req)
-	apiURL := "https://open.douyin.com/im/send_msg/"
 
-	resp, err := a.mgr.httpClient.Post(apiURL, "application/json", bytes.NewReader(body))
-	if err != nil {
-		log.Printf("[DOUYIN] active push error: %v", err)
-		// Retry up to 3 times (doc section 7A AccessToken retry pattern)
-		for i := 0; i < 3; i++ {
-			time.Sleep(time.Duration(i+1) * 500 * time.Millisecond)
-			resp, err = a.mgr.httpClient.Post(apiURL, "application/json", bytes.NewReader(body))
-			if err == nil {
-				break
-			}
-			log.Printf("[DOUYIN] retrying push (%d/3)", i+1)
-		}
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		respBody, _ := io.ReadAll(resp.Body)
-		log.Printf("[DOUYIN] push failed: status=%d body=%s", resp.StatusCode, string(respBody))
-		return
+	// S7-12: API URL from config or fallback to default
+	apiURL := cfg.WebhookURL
+	if apiURL == "" {
+		apiURL = "https://open.douyin.com/im/send_msg/"
 	}
 
-	log.Printf("[DOUYIN] active push OK to user %s", toUserID)
-	_ = appSecret
+	a.postWithRetry(apiURL, accessToken, body, 3)
 }
 
-// PushInterruptCard pushes an interrupt card as numbered options (doc section 7B: 中断反调).
-// Douyin doesn't support rich cards, so we use text + numeric options:
-// "请回复：1.没有过敏 2.烟酰胺过敏 3.水杨酸过敏"
+// getAccessToken retrieves or refreshes Douyin access_token (S7-05).
+func (a *DouyinAdapter) getAccessToken(cfg *TenantPlatform) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cached, err := a.mgr.GetCachedAccessToken(ctx, "douyin", cfg.AppID)
+	if err == nil && cached != "" {
+		return cached, nil
+	}
+
+	appSecret, err := a.mgr.DecryptAppSecret(cfg.AppSecretEncrypted)
+	if err != nil {
+		return "", fmt.Errorf("decrypt app_secret: %w", err)
+	}
+
+	apiURL := fmt.Sprintf("https://open.douyin.com/oauth/access_token?client_key=%s&client_secret=%s&grant_type=client_credential",
+		url.QueryEscape(cfg.AppID), url.QueryEscape(appSecret))
+
+	resp, err := a.mgr.httpClient.Get(apiURL)
+	if err != nil {
+		return "", fmt.Errorf("douyin token request: %w", err)
+	}
+	defer func() {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
+
+	var result struct {
+		Data struct {
+			AccessToken string `json:"access_token"`
+			ExpiresIn   int    `json:"expires_in"`
+		} `json:"data"`
+		ErrorCode int    `json:"error_code"`
+		ErrorMsg  string `json:"description"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("parse douyin token response: %w", err)
+	}
+	if result.ErrorCode != 0 {
+		return "", fmt.Errorf("douyin token error: code=%d msg=%s", result.ErrorCode, result.ErrorMsg)
+	}
+
+	if err := a.mgr.CacheAccessToken(ctx, "douyin", cfg.AppID, result.Data.AccessToken, result.Data.ExpiresIn); err != nil {
+		log.Printf("[DOUYIN] cache access_token failed: %v", err)
+	}
+
+	return result.Data.AccessToken, nil
+}
+
+// postWithRetry sends a POST with bearer token and retry logic.
+// S7-08: Properly drains and closes response body on every path.
+func (a *DouyinAdapter) postWithRetry(apiURL, accessToken string, body []byte, maxRetry int) {
+	for attempt := 0; attempt < maxRetry; attempt++ {
+		req, err := http.NewRequest("POST", apiURL, bytes.NewReader(body))
+		if err != nil {
+			log.Printf("[DOUYIN] create request: %v", err)
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+
+		resp, err := a.mgr.httpClient.Do(req)
+		if err != nil {
+			log.Printf("[DOUYIN] push error (attempt %d/%d): %v", attempt+1, maxRetry, err)
+			time.Sleep(time.Duration(attempt+1) * 500 * time.Millisecond)
+			continue
+		}
+
+		// S7-08: drain and close resp.Body on EVERY path
+		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode == 200 {
+			log.Printf("[DOUYIN] push OK to user (attempt %d)", attempt+1)
+			return
+		}
+
+		log.Printf("[DOUYIN] push failed (attempt %d/%d): status=%d body=%s",
+			attempt+1, maxRetry, resp.StatusCode, string(respBody))
+		time.Sleep(time.Duration(attempt+1) * 500 * time.Millisecond)
+	}
+}
+
+// PushInterruptCard pushes an interrupt card as numbered options (doc section 7B).
 func (a *DouyinAdapter) PushInterruptCard(cfg *TenantPlatform, toUserID, fromUserID string, card *InterruptCard) {
 	text := card.Question + "\n请回复："
 	for i, opt := range card.Options {

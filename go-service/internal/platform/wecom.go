@@ -58,13 +58,20 @@ func (a *WeComAdapter) HandleVerify(w http.ResponseWriter, r *http.Request, tena
 		return
 	}
 
+	// S7-01: base64-decode echostr before AES decrypt
 	decoded, err := base64.StdEncoding.DecodeString(params.Echostr)
 	if err != nil {
 		a.fail(w, r, fmt.Sprintf("%d", tenantID), "wecom", fmt.Sprintf("echostr base64 decode: %v", err))
 		return
 	}
 
-	decrypted, err := a.aesDecrypt(decoded, []byte(cfg.EncodingAESKey+"="))
+	aesKey, err := a.decodeAESKey(cfg.EncodingAESKey)
+	if err != nil {
+		a.fail(w, r, fmt.Sprintf("%d", tenantID), "wecom", fmt.Sprintf("decode AES key: %v", err))
+		return
+	}
+
+	decrypted, err := a.aesDecrypt(decoded, aesKey)
 	if err != nil {
 		a.fail(w, r, fmt.Sprintf("%d", tenantID), "wecom", fmt.Sprintf("echostr AES decrypt: %v", err))
 		return
@@ -109,13 +116,20 @@ func (a *WeComAdapter) HandleMessage(w http.ResponseWriter, r *http.Request, ten
 		return
 	}
 
+	// S7-02: base64-decode the encrypted body then AES decrypt with properly decoded key
 	encryptedBytes, err := base64.StdEncoding.DecodeString(encMsg.Encrypt)
 	if err != nil {
 		a.fail(w, r, fmt.Sprintf("%d", tenantID), "wecom", fmt.Sprintf("decode encrypted body: %v", err))
 		return
 	}
 
-	decryptedXML, err := a.aesDecrypt(encryptedBytes, []byte(cfg.EncodingAESKey+"="))
+	aesKey, err := a.decodeAESKey(cfg.EncodingAESKey)
+	if err != nil {
+		a.fail(w, r, fmt.Sprintf("%d", tenantID), "wecom", fmt.Sprintf("decode AES key: %v", err))
+		return
+	}
+
+	decryptedXML, err := a.aesDecrypt(encryptedBytes, aesKey)
 	if err != nil {
 		a.fail(w, r, fmt.Sprintf("%d", tenantID), "wecom", fmt.Sprintf("AES decrypt body: %v", err))
 		return
@@ -174,10 +188,11 @@ func (a *WeComAdapter) pushTextMessage(cfg *TenantPlatform, openID, text string)
 		return
 	}
 
+	agentID := a.getAgentID(cfg)
 	push := WeComActivePush{
 		ToUser:  openID,
 		MsgType: "text",
-		AgentID: 1000002,
+		AgentID: agentID,
 		Text:    &WeComTextContent{Content: text},
 	}
 
@@ -200,16 +215,26 @@ func (a *WeComAdapter) pushResultCard(cfg *TenantPlatform, openID, result string
 		description = description[:120]
 	}
 
+	agentID := a.getAgentID(cfg)
 	push := WeComActivePush{
 		ToUser:  openID,
 		MsgType: "news",
-		AgentID: 1000002,
+		AgentID: agentID,
 		News: &WeComNewsContent{
 			Articles: []WeComArticle{{Title: title, Description: description, URL: ""}},
 		},
 	}
 
 	a.sendActivePush(accessToken, push, 0, cfg)
+}
+
+// getAgentID reads the AgentID from config (S7-07 fix: was hardcoded 1000002).
+// Falls back to 1000002 if not configured in DB (default WeCom agent).
+func (a *WeComAdapter) getAgentID(cfg *TenantPlatform) int {
+	if cfg.WeComAgentID != 0 {
+		return cfg.WeComAgentID
+	}
+	return 1000002
 }
 
 // sendActivePush calls POST /cgi-bin/message/send with retry (max 3 per doc section 7A).
@@ -232,7 +257,11 @@ func (a *WeComAdapter) sendActivePush(accessToken string, push WeComActivePush, 
 		}
 		return
 	}
-	defer resp.Body.Close()
+	// S7-08: resp.Body is closed via defer, but we must drain it before defer
+	defer func() {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 
 	var tokenResp WeComTokenResponse
 	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
@@ -244,8 +273,10 @@ func (a *WeComAdapter) sendActivePush(accessToken string, push WeComActivePush, 
 		log.Printf("[WECOM] push failed: errcode=%d errmsg=%s", tokenResp.ErrCode, tokenResp.ErrMsg)
 		if tokenResp.ErrCode == 42001 || tokenResp.ErrCode == 40014 {
 			if retryCount < 3 {
-				a.mgr.redis.Delete(context.Background(),
-					fmt.Sprintf(accessTokenKeyPrefix, "wecom", cfg.AppID))
+				// S7-14: use context.WithTimeout instead of context.Background()
+				delCtx, delCancel := context.WithTimeout(context.Background(), 3*time.Second)
+				a.mgr.redis.Delete(delCtx, fmt.Sprintf(accessTokenKeyPrefix, "wecom", cfg.AppID))
+				delCancel()
 				time.Sleep(time.Duration(retryCount+1) * 500 * time.Millisecond)
 				newToken, err := a.getAccessToken(cfg)
 				if err == nil {
@@ -261,7 +292,9 @@ func (a *WeComAdapter) sendActivePush(accessToken string, push WeComActivePush, 
 
 // getAccessToken retrieves or refreshes WeCom access_token (doc section 7A: Redis TTL = expires_in - 60s).
 func (a *WeComAdapter) getAccessToken(cfg *TenantPlatform) (string, error) {
-	ctx := context.Background()
+	// S7-14: use context.WithTimeout
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
 	cached, err := a.mgr.GetCachedAccessToken(ctx, "wecom", cfg.AppID)
 	if err == nil && cached != "" {
@@ -280,7 +313,10 @@ func (a *WeComAdapter) getAccessToken(cfg *TenantPlatform) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("gettoken request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 
 	var tokenResp WeComTokenResponse
 	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
@@ -299,6 +335,19 @@ func (a *WeComAdapter) getAccessToken(cfg *TenantPlatform) (string, error) {
 }
 
 // --- AES crypto helpers for WeCom (AES-256-CBC, IV = key[:16]) ---
+
+// decodeAESKey converts the 43-char base64 EncodingAESKey to the 32-byte AES key.
+// WeCom provides a 43-char base64 string; we decode to get 32 bytes.
+func (a *WeComAdapter) decodeAESKey(encodingAESKey string) ([]byte, error) {
+	key, err := base64.StdEncoding.DecodeString(encodingAESKey + "=")
+	if err != nil {
+		return nil, fmt.Errorf("decode AES key: %w", err)
+	}
+	if len(key) != 32 {
+		return nil, fmt.Errorf("AES key must be 32 bytes, got %d", len(key))
+	}
+	return key, nil
+}
 
 func (a *WeComAdapter) aesDecrypt(ciphertext []byte, key []byte) (string, error) {
 	block, err := aes.NewCipher(key)
@@ -324,6 +373,8 @@ func (a *WeComAdapter) aesDecrypt(ciphertext []byte, key []byte) (string, error)
 	return string(plaintext), nil
 }
 
+// aesEncrypt encrypts data using AES-CBC with the given key.
+// S7-03: now properly accepts the decoded key from decodeAESKey.
 func (a *WeComAdapter) aesEncrypt(plaintext []byte, key []byte) (string, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {

@@ -82,17 +82,14 @@ func main() {
 	mux.HandleFunc("PUT /api/v1/admin/tenants/{id}/approve", handler.ApproveTenant)
 	mux.HandleFunc("GET /api/v1/admin/tenants/{id}", handler.GetTenant)
 
-	// --- Middleware chain (outermost first, executes in wrap order) ---
+	// --- Middleware chain ---
+	// Wrapping order: Recovery → RequestID → Logger → RateLimit → Auth → mux
+	// Outermost middleware runs first on inbound request, last on outbound response.
 	var httpHandler http.Handler = mux
-	// 5. Auth (innermost business middleware)
 	httpHandler = auth.Middleware(cfg)(httpHandler)
-	// 4. RateLimit
 	httpHandler = middleware.RateLimit(cfg)(httpHandler)
-	// 3. Logger (structured JSON logging)
 	httpHandler = middleware.Logger(httpHandler)
-	// 2. RequestID (inject trace_id earliest)
 	httpHandler = middleware.RequestID(httpHandler)
-	// 1. Recovery (outermost — catch panics from everything)
 	httpHandler = middleware.Recovery(httpHandler)
 
 	srv := &http.Server{

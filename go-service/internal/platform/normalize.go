@@ -10,7 +10,7 @@ import (
 //   - Content maps to message.content
 //   - MsgType determines message.type (text/image)
 func NormalizeWeCom(msg *WeComDecryptedMsg, tenantID int64, openID string) *InboundMessage {
-	userID := openIDToUserID(openID)
+	userID := openIDToUserID(openID, tenantID)
 	msgType := "text"
 	var imageURL *string
 	if msg.MsgType == "image" {
@@ -37,7 +37,7 @@ func NormalizeWeCom(msg *WeComDecryptedMsg, tenantID int64, openID string) *Inbo
 // NormalizeDouyin converts a Douyin webhook body to the internal format.
 // Fields used: FromUserID → user_id, Content.Text → message.content.
 func NormalizeDouyin(body *DouyinWebhookBody, tenantID int64) *InboundMessage {
-	userID := openIDToUserID(body.FromUserID)
+	userID := openIDToUserID(body.FromUserID, tenantID)
 	msgType := "text"
 	if body.MsgType != "text" {
 		msgType = body.MsgType
@@ -59,7 +59,7 @@ func NormalizeDouyin(body *DouyinWebhookBody, tenantID int64) *InboundMessage {
 // NormalizeXHS converts a Xiaohongshu webhook body to the internal format.
 // Fields used: FromUserID → user_id, Content → message.content.
 func NormalizeXHS(body *XHSWebhookBody, tenantID int64) *InboundMessage {
-	userID := openIDToUserID(body.FromUserID)
+	userID := openIDToUserID(body.FromUserID, tenantID)
 	msgType := "text"
 	if body.MsgType != "text" {
 		msgType = body.MsgType
@@ -79,9 +79,9 @@ func NormalizeXHS(body *XHSWebhookBody, tenantID int64) *InboundMessage {
 }
 
 // openIDToUserID maps an openid to a deterministic numeric user_id.
-// In production this would query a user-platform mapping table; for now it's a hash.
-func openIDToUserID(openID string) int64 {
-	var h int64
+// S3-07: Include tenant_id in hash to prevent cross-tenant collisions.
+func openIDToUserID(openID string, tenantID int64) int64 {
+	var h int64 = tenantID
 	for _, c := range openID {
 		h = h*31 + int64(c)
 	}

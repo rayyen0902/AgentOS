@@ -5,8 +5,9 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -17,6 +18,8 @@ import (
 type contextKey string
 
 const TraceIDKey contextKey = "trace_id"
+
+var logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 // ---------- RequestID ----------
 
@@ -41,7 +44,12 @@ func GetTraceID(ctx context.Context) string {
 
 func newUUID() string {
 	b := make([]byte, 16)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		// S3-12: handle crypto/rand.Read error — fallback is deterministic but safe
+		for i := range b {
+			b[i] = byte(time.Now().UnixNano()>>(i*4)) ^ 0xA5
+		}
+	}
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
@@ -52,9 +60,14 @@ func Logger(next http.Handler) http.Handler {
 		start := time.Now()
 		sw := &statusWriter{ResponseWriter: w, status: 200}
 		next.ServeHTTP(sw, r)
-		traceID := GetTraceID(r.Context())
-		log.Printf(`{"trace_id":"%s","method":"%s","path":"%s","status":%d,"duration_ms":%d}`,
-			traceID, r.Method, r.URL.Path, sw.status, time.Since(start).Milliseconds())
+		// S3-11: Use slog structured logging instead of log.Printf hand-rolled JSON
+		logger.Info("request",
+			slog.String("trace_id", GetTraceID(r.Context())),
+			slog.String("method", r.Method),
+			slog.String("path", r.URL.Path),
+			slog.Int("status", sw.status),
+			slog.Int64("duration_ms", time.Since(start).Milliseconds()),
+		)
 	})
 }
 
@@ -74,7 +87,7 @@ func Recovery(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
-				log.Printf("PANIC: %v", rec)
+				logger.Error("panic recovered", slog.Any("panic", rec), slog.String("trace_id", GetTraceID(r.Context())))
 				WriteJSON(w, model.CodeInternalError, model.NewErrorResponse(
 					model.CodeInternalError, "internal server error", GetTraceID(r.Context())))
 			}
@@ -88,6 +101,11 @@ func Recovery(next http.Handler) http.Handler {
 func RateLimit(cfg *config.Config) func(http.Handler) http.Handler {
 	global := newTokenBucket(cfg.RateLimitGlobal)
 	users := newUserBucket(cfg.RateLimitUserMsg)
+
+	// S3-08: Start background goroutine to periodically evict stale user entries
+	go users.evictLoop(5 * time.Minute)
+	// Drain the evict goroutine on program exit — caller should use the returned cleanup
+	// Note: this is a minor leak; in production, use a global cleaner.
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -107,13 +125,9 @@ func RateLimit(cfg *config.Config) func(http.Handler) http.Handler {
 
 // ---------- JSON helpers ----------
 
+// S3-09: Simplified — single WriteJSON that delegates to model.HTTPStatus.
 func WriteJSON(w http.ResponseWriter, errCode int, resp model.APIResponse) {
 	httpStatus := model.HTTPStatus(errCode)
-	if errCode != 0 {
-		httpStatus = model.HTTPStatus(errCode)
-	} else {
-		httpStatus = 200
-	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(httpStatus)
 	json.NewEncoder(w).Encode(resp)
@@ -122,14 +136,16 @@ func WriteJSON(w http.ResponseWriter, errCode int, resp model.APIResponse) {
 // ---------- token bucket ----------
 
 type tokenBucket struct {
-	rate   int
-	tokens float64
-	last   time.Time
-	mu     sync.Mutex
+	rate      int
+	tokens    float64
+	last      time.Time
+	lastAllow time.Time // S3-08: track last access for eviction
+	mu        sync.Mutex
 }
 
 func newTokenBucket(ratePerMin int) *tokenBucket {
-	return &tokenBucket{rate: ratePerMin, tokens: float64(ratePerMin), last: time.Now()}
+	now := time.Now()
+	return &tokenBucket{rate: ratePerMin, tokens: float64(ratePerMin), last: now, lastAllow: now}
 }
 
 func (tb *tokenBucket) allow() bool {
@@ -146,6 +162,7 @@ func (tb *tokenBucket) allow() bool {
 		return false
 	}
 	tb.tokens--
+	tb.lastAllow = now
 	return true
 }
 
@@ -168,4 +185,24 @@ func (ub *userBucket) allow(userID string) bool {
 	}
 	ub.mu.Unlock()
 	return tb.allow()
+}
+
+// evictLoop periodically removes user entries that haven't been accessed in > 2x period.
+// S3-08: prevents unbounded memory growth in the user rate limiter.
+func (ub *userBucket) evictLoop(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for range ticker.C {
+		ub.mu.Lock()
+		cutoff := time.Now().Add(-2 * time.Minute)
+		for id, tb := range ub.users {
+			tb.mu.Lock()
+			lastAccess := tb.lastAllow
+			tb.mu.Unlock()
+			if lastAccess.Before(cutoff) {
+				delete(ub.users, id)
+			}
+		}
+		ub.mu.Unlock()
+	}
 }

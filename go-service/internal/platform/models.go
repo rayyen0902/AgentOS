@@ -36,6 +36,7 @@ type TenantPlatform struct {
 	AppSecretEncrypted string    `json:"app_secret_encrypted"` // AES-256-GCM encrypted
 	Token              string    `json:"token"`                // 企微 token
 	EncodingAESKey     string    `json:"encoding_aes_key"`     // 企微 AES key
+	WeComAgentID       int       `json:"wecom_agent_id"`       // S7-07: 企微 AgentID, default 1000002
 	WebhookURL         string    `json:"webhook_url"`
 	Status             string    `json:"status"`
 	CreatedAt          time.Time `json:"created_at"`
