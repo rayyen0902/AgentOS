@@ -74,14 +74,25 @@ class AgentEvaluationEngine:
         "trust": 0.20,
     }
 
+    # Agent type → 显示名称映射
+    AGENT_DISPLAY_NAMES = {
+        "workshop": "配药师",
+        "diagnosis": "问卷师",
+        "photo_analyst": "识肤师",
+        "copywriter": "日报官",
+        "orchestrator": "编排器",
+    }
+
     async def _calculate_accuracy(
         self, agent_name: str, period_days: int = 7
     ) -> tuple[float, int]:
         """
         计算 Accuracy（准确度）。
-        数据来源: Reflection Agent satisfaction + 选购率。
+        数据来源: Reflection Agent satisfaction。
 
-        算法: high_satisfaction / total_reflections
+        算法: high_satisfaction / total_reflections (按 agent_name 过滤 event_data JSON 中的 agent_name 字段)
+
+        S8-03 修复: 使用 event_data->>'agent_name' 按 agent_name 过滤
         """
         rows = await db.fetch(
             """
@@ -89,10 +100,11 @@ class AgentEvaluationEngine:
             FROM agent_audit_log
             WHERE agent_name = 'reflection'
               AND event_type = 'reflection_complete'
-              AND created_at >= NOW() - ($1 || ' days')::INTERVAL
+              AND created_at >= NOW() - make_interval(days => $1)
               AND event_data IS NOT NULL
+              AND event_data->>'agent_name' = $2
             """,
-            str(period_days),
+            period_days, agent_name,
         )
 
         high = medium = low = 0
@@ -124,30 +136,31 @@ class AgentEvaluationEngine:
         计算 Conversion（转化率）。
         数据来源: 选购回调 + 订单数据。
 
-        当前实现: 从 agent_audit_log 中统计 workshop_card 推送 vs 选购事件。
+        S8-04 修复: event_data->>'agent_name' 按 agent_name 过滤
         """
-        # workshop_card 推送次数
+        # 该 agent 的 workshop_card 推送次数（event_data 中包含 agent_name 字段）
         workshop_row = await db.fetchrow(
             """
             SELECT COUNT(*) AS cnt
             FROM agent_audit_log
             WHERE agent_name = 'reflection'
               AND event_type = 'reflection_complete'
-              AND created_at >= NOW() - ($1 || ' days')::INTERVAL
+              AND created_at >= NOW() - make_interval(days => $1)
+              AND event_data->>'agent_name' = $2
             """,
-            str(period_days),
+            period_days, agent_name,
         )
         total_rec = workshop_row["cnt"] if workshop_row else 0
 
-        # 选购/下单事件（从 audit_log 中查找 purchase 或 order 事件）
+        # 选购事件（同 session 内的 purchase 事件）
         purchase_row = await db.fetchrow(
             """
             SELECT COUNT(*) AS cnt
             FROM agent_audit_log
             WHERE event_type IN ('purchase', 'order_placed', 'add_to_cart')
-              AND created_at >= NOW() - ($1 || ' days')::INTERVAL
+              AND created_at >= NOW() - make_interval(days => $1)
             """,
-            str(period_days),
+            period_days,
         )
         purchases = purchase_row["cnt"] if purchase_row else 0
 
@@ -163,32 +176,36 @@ class AgentEvaluationEngine:
         """
         计算 Retention（留存率）。
         数据来源: 会话日志 — 7 日内有 ≥ 2 次会话的用户比例。
+
+        S8-05 修复: 通过 session_states.current_agent 过滤对应 agent 用户群
         """
-        # 总用户数
+        # 该 agent 服务过的用户总数
         total_row = await db.fetchrow(
             """
             SELECT COUNT(DISTINCT user_id) AS cnt
             FROM session_states
-            WHERE created_at >= NOW() - ($1 || ' days')::INTERVAL
+            WHERE current_agent = $1
+              AND created_at >= NOW() - make_interval(days => $2)
             """,
-            str(period_days),
+            agent_name, period_days,
         )
         total_users = total_row["cnt"] if total_row else 0
         if total_users == 0:
             return 0.0, 0
 
-        # 回访用户数（≥ 2 次会话）
+        # 回访用户数（≥ 2 次同 agent 会话）
         retained_row = await db.fetchrow(
             """
             SELECT COUNT(*) AS cnt FROM (
                 SELECT user_id
                 FROM session_states
-                WHERE created_at >= NOW() - ($1 || ' days')::INTERVAL
+                WHERE current_agent = $1
+                  AND created_at >= NOW() - make_interval(days => $2)
                 GROUP BY user_id
                 HAVING COUNT(*) >= 2
             ) sub
             """,
-            str(period_days),
+            agent_name, period_days,
         )
         retained = retained_row["cnt"] if retained_row else 0
 
@@ -203,17 +220,20 @@ class AgentEvaluationEngine:
         数据来源: Reflection Agent 评估 — 采纳率 / 追问率。
 
         算法: 1 - (追问次数 / 推荐次数)
+
+        S8-06 修复: event_data->>'agent_name' 按 agent_name 过滤
         """
-        # Reflection 总数
+        # 该 agent 的 Reflection 总数
         total_row = await db.fetchrow(
             """
             SELECT COUNT(*) AS cnt
             FROM agent_audit_log
             WHERE event_type = 'reflection_complete'
               AND agent_name = 'reflection'
-              AND created_at >= NOW() - ($1 || ' days')::INTERVAL
+              AND created_at >= NOW() - make_interval(days => $1)
+              AND event_data->>'agent_name' = $2
             """,
-            str(period_days),
+            period_days, agent_name,
         )
         total = total_row["cnt"] if total_row else 0
         if total == 0:
@@ -226,10 +246,11 @@ class AgentEvaluationEngine:
             FROM agent_audit_log
             WHERE event_type = 'reflection_complete'
               AND agent_name = 'reflection'
-              AND created_at >= NOW() - ($1 || ' days')::INTERVAL
+              AND created_at >= NOW() - make_interval(days => $1)
+              AND event_data->>'agent_name' = $2
               AND event_data IS NOT NULL
             """,
-            str(period_days),
+            period_days, agent_name,
         )
 
         low_count = 0

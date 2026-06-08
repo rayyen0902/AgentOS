@@ -1,0 +1,105 @@
+syntax = "proto3";
+
+package forgetting_engine.v1;
+
+// FE 遗忘引擎服务 — 对应 knownot.cc:50052
+// 严格对齐 forgetting-engine MCP 工具接口
+
+service ForgettingEngine {
+  // 握手配对
+  rpc Handshake(HandshakeRequest) returns (HandshakeResponse);
+
+  // 检索记忆上下文
+  rpc Retrieve(RetrieveRequest) returns (RetrieveResponse);
+
+  // 写入记忆
+  rpc Ingest(IngestRequest) returns (IngestResponse);
+
+  // 写入用户特征
+  rpc IngestFeatures(IngestFeaturesRequest) returns (IngestFeaturesResponse);
+
+  // 更新 Kin 画像
+  rpc UpdateKinProfile(UpdateKinProfileRequest) returns (UpdateKinProfileResponse);
+}
+
+// ------- Handshake -------
+
+message HandshakeRequest {
+  string user_id = 1;
+  string kin_id = 2;          // 可选，无则自动分配
+}
+
+message HandshakeResponse {
+  string kin_id = 1;
+  string user_id = 2;
+  bool is_new = 3;
+  string message = 4;
+}
+
+// ------- Retrieve -------
+
+message RetrieveRequest {
+  string query = 1;
+  string layer = 2;           // semantic | episodic | preference | all
+  int32 n = 3;                // 1-20
+  string kin_id = 4;
+  string session_id = 5;
+}
+
+message MemoryItemMsg {
+  string id = 1;
+  string text = 2;
+  string layer = 3;
+  double score = 4;
+  string created_at = 5;
+}
+
+message RetrieveResponse {
+  repeated MemoryItemMsg items = 1;
+}
+
+// ------- Ingest -------
+
+message IngestRequest {
+  string text = 1;
+  string role = 2;            // user | assistant
+  string session_id = 3;
+  string kin_id = 4;
+  double importance = 5;      // 0.0-1.0
+}
+
+message IngestResponse {
+  string msg_id = 1;
+  bool success = 2;
+}
+
+// ------- IngestFeatures -------
+
+message Feature {
+  string category = 1;
+  string text = 2;
+}
+
+message IngestFeaturesRequest {
+  string kin_id = 1;
+  repeated Feature features = 2;
+}
+
+message IngestFeaturesResponse {
+  bool success = 1;
+}
+
+// ------- UpdateKinProfile -------
+
+message UpdateKinProfileRequest {
+  string kin_id = 1;
+  repeated string roles = 2;
+  string experience = 3;
+  string languages = 4;       // JSON数组字符串
+  string preferences = 5;     // JSON对象字符串
+  string raw_profile = 6;     // 完整画像JSON
+}
+
+message UpdateKinProfileResponse {
+  bool success = 1;
+}

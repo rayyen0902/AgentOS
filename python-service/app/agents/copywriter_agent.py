@@ -65,12 +65,11 @@ class CopywriterAgent(BaseAgent):
 
         memory_namespace = f"tenant:{ctx.tenant_id}:agent:copywriter"
 
-        # ── 判断是早晨还是晚上 ──
-        from datetime import datetime, timezone
-        now = datetime.now(timezone.utc)
-        current_hour = now.hour + 8  # 粗略转换为北京时间
-        if current_hour >= 24:
-            current_hour -= 24
+        # ── 判断是早晨还是晚上 (S6-17: 使用 zoneinfo) ──
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        current_hour = now.hour
         is_morning = 5 <= current_hour < 12
         is_evening = 18 <= current_hour < 24 or 0 <= current_hour < 5
         period = "morning" if is_morning else "evening" if is_evening else "both"
@@ -190,19 +189,23 @@ class CopywriterAgent(BaseAgent):
             created_at=_now(),
         ))
 
-        # ── 可中断: 确认调整 ──
-        interrupt = InterruptRequest(
-            type="schedule_adjust",
-            question="这是为您编排的护肤日程，需要调整吗？",
-            options=["看起来很好，就这样", "调整早晨步骤", "调整晚间步骤", "增加/减少步骤"],
-            timeout_s=300,
-            created_at=_now(),
-        )
-        events.append(StatusEvent(
-            seq=seq + 1, source="agent:copywriter",
-            status="done", label="等待用户确认日程",
-            created_at=_now(),
-        ))
+        # ── 可中断: 仅在用户未明确指示时确认调整 (S6-15) ──
+        interrupt = None
+        adjust_triggers = ["调整", "改", "换", "增加", "删除", "修改"]
+        user_wants_adjust = any(t in input for t in adjust_triggers)
+        if "就这样" not in input and "直接生成" not in input and not user_wants_adjust:
+            interrupt = InterruptRequest(
+                type="schedule_adjust",
+                question="这是为您编排的护肤日程，需要调整吗？",
+                options=["看起来很好，就这样", "调整早晨步骤", "调整晚间步骤", "增加/减少步骤"],
+                timeout_s=300,
+                created_at=_now(),
+            )
+            events.append(StatusEvent(
+                seq=seq + 1, source="agent:copywriter",
+                status="done", label="等待用户确认日程",
+                created_at=_now(),
+            ))
 
         # ── 构造回复 ──
         period_label = "早安" if is_morning else "晚安" if is_evening else "你好"
@@ -261,7 +264,7 @@ class CopywriterAgent(BaseAgent):
         )
 
     async def resume(self, ctx: SessionContext, reply: str) -> AgentResult:
-        """中断恢复: 用户确认调整日程"""
+        """中断恢复: 用户确认调整日程 (S6-06: 真正调用 LLM 重新生成)"""
         events: list[StatusEvent] = []
 
         if "就这样" in reply or "很好" in reply:
@@ -273,12 +276,51 @@ class CopywriterAgent(BaseAgent):
                 done=True,
             )
 
-        # 用户要调整 → 重新生成
+        # 用户要调整 → 调用 LLM 重新生成 schedule (S6-06 fix)
         events.append(StatusEvent(
             seq=0, source="agent:copywriter",
             status="running", label=f"正在根据您的反馈调整日程...",
             created_at=_now(),
         ))
+
+        import json
+        prev_schedule = ctx.agent_state.get("schedule", {})
+        try:
+            adjust_prompt = f"""用户当前日程:
+            {json.dumps(prev_schedule, ensure_ascii=False) if prev_schedule else '(无)'}
+
+            用户调整要求: {reply}
+
+            请根据用户的调整要求，重新生成 schedule_card JSON。
+            保持与原来相同的 period 和 date，只调整 routine 步骤和 tips。"""
+
+            llm_raw = await llm_chat(
+                model=settings.LLM_FLASH_MODEL,
+                system_prompt=COPYWRITER_SYSTEM_PROMPT,
+                user_prompt=adjust_prompt,
+                timeout_s=18.0,
+                json_mode=True,
+                temperature=0.5,
+                max_tokens=1536,
+            )
+            new_schedule = json.loads(llm_raw)
+            new_schedule.setdefault("period", prev_schedule.get("period", "both"))
+            new_schedule.setdefault("date", prev_schedule.get("date", ""))
+            new_schedule.setdefault("morning_routine", [])
+            new_schedule.setdefault("evening_routine", [])
+            new_schedule.setdefault("tips", [])
+            reply_text = f"已根据「{reply}」调整护肤日程:\n"
+            if new_schedule.get("morning_routine"):
+                reply_text += "\n🌅 早晨:\n"
+                for s in new_schedule["morning_routine"][:4]:
+                    reply_text += f"  {s['step']}. {s.get('action','')} → {s.get('product','')}\n"
+            if new_schedule.get("evening_routine"):
+                reply_text += "\n🌙 晚间:\n"
+                for s in new_schedule["evening_routine"][:4]:
+                    reply_text += f"  {s['step']}. {s.get('action','')} → {s.get('product','')}\n"
+        except Exception as e:
+            logger.error(f"[copywriter] resume LLM failed: {e}")
+            reply_text = f"已根据「{reply}」调整护肤日程。调整后的方案已更新，记得查看哦~"
 
         events.append(StatusEvent(
             seq=1, source="agent:copywriter",
@@ -288,12 +330,12 @@ class CopywriterAgent(BaseAgent):
 
         return AgentResult(
             state={"phase": "completed", "current_agent": None},
-            reply=f"已根据「{reply}」调整护肤日程。调整后的方案已更新，记得查看哦~",
+            reply=reply_text,
             events=events,
             done=True,
         )
 
 
 def _now() -> str:
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat()
+    from app.agents.shared_util import now_iso
+    return now_iso()

@@ -56,10 +56,10 @@ async def product_crud(input: ProductCRUDInput) -> ProductCRUDOutput:
             return await _product_create(tenant_id, data)
 
         elif action == "read":
-            return await _product_read(product_id)
+            return await _product_read(product_id, tenant_id)
 
         elif action == "update":
-            return await _product_update(product_id, data)
+            return await _product_update(product_id, tenant_id, data)
 
         elif action == "list":
             return await _product_list(tenant_id)
@@ -107,12 +107,13 @@ async def _product_create(tenant_id: int, data: dict) -> ProductCRUDOutput:
     )
 
 
-async def _product_read(product_id: int) -> ProductCRUDOutput:
+async def _product_read(product_id: int, tenant_id: int) -> ProductCRUDOutput:
     if not product_id:
         return ProductCRUDOutput(success=False, action="read", error="product_id is required")
 
     row = await db.fetchrow(
-        f"SELECT {_PRODUCT_SELECT} FROM products WHERE id = $1", product_id
+        f"SELECT {_PRODUCT_SELECT} FROM products WHERE id = $1 AND tenant_id = $2",
+        product_id, tenant_id,
     )
     if not row:
         return ProductCRUDOutput(success=False, action="read", error=f"Product {product_id} not found")
@@ -125,7 +126,7 @@ async def _product_read(product_id: int) -> ProductCRUDOutput:
     )
 
 
-async def _product_update(product_id: int, data: dict) -> ProductCRUDOutput:
+async def _product_update(product_id: int, tenant_id: int, data: dict) -> ProductCRUDOutput:
     if not product_id:
         return ProductCRUDOutput(success=False, action="update", error="product_id is required")
 
@@ -148,8 +149,9 @@ async def _product_update(product_id: int, data: dict) -> ProductCRUDOutput:
         return ProductCRUDOutput(success=False, action="update", error="No fields to update")
 
     params.append(product_id)
+    params.append(tenant_id)
     result = await db.execute(
-        f"UPDATE products SET {', '.join(updates)} WHERE id = ${idx}",
+        f"UPDATE products SET {', '.join(updates)} WHERE id = ${idx} AND tenant_id = ${idx + 1}",
         *params,
     )
 

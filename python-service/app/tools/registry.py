@@ -48,22 +48,24 @@ async def fe_retrieve(input: FERetrieveInput) -> FERetrieveOutput:
 # 5.3 fe_ingest — 写记忆
 # ============================================================
 
-async def fe_ingest(input: FEIngestInput) -> None:
+async def fe_ingest(input: FEIngestInput) -> FEIngestOutput:
     """
-    重试 3次，间隔 1s
+    重试 3次，间隔 1s (S5-09: 返回 FEIngestOutput 而非 None)
     兜底: 记录失败日志，不阻断主流程
-    异步: 使用 asyncio.create_task 调用，不阻塞 Agent 响应
     """
     try:
         result = await with_retry("fe_ingest", _fe_ingest_raw, input)
         if result is None:
             logger.error(f"[fe_ingest] failed after all retries for session={input.session_id}")
+            return FEIngestOutput(msg_id="failed", success=False)
+        return result
     except Exception as e:
         logger.error(f"[fe_ingest] failed for session={input.session_id}: {e}")
+        return FEIngestOutput(msg_id="failed", success=False)
 
 
 async def fe_ingest_async(input: FEIngestInput) -> None:
-    """外部调用：使用 asyncio.create_task 异步写记忆，不阻塞 Agent 响应"""
+    """外部调用：使用 asyncio.create_task 异步写记忆，不阻塞 Agent 响应 (S5-09: fire-and-forget)"""
     asyncio.create_task(fe_ingest(input))
 
 

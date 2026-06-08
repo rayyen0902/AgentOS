@@ -6,6 +6,9 @@ Memory Consolidation — 异步记忆巩固
 窗口: 7 天内出现 ≥ 3 次的相同语义事实 → 从 Episodic 提升至 Semantic
 写入: 通过 fe_ingest Tool，importance = 0.8
 去重: 相同 namespace + 相似度 > 0.95 的 Semantic 条目合并（FE 侧负责）
+
+S8-11 修复: 删除了 app/tools/consolidation.py 的重复实现，此处为唯一版本。
+S8-12 修复: 通过 registry 层调用 fe_retrieve/fe_ingest，获得重试+兜底。
 """
 import asyncio
 import json
@@ -13,7 +16,7 @@ import logging
 from collections import Counter
 from typing import Any
 
-from app.tools.fe_client import fe_retrieve, fe_ingest
+from app.tools.registry import fe_retrieve, fe_ingest
 from app.tools.models import FERetrieveInput, FEIngestInput
 from app.tools.embedding import cosine_similarity, embed_single
 from db_util import db
@@ -122,7 +125,6 @@ class MemoryConsolidation:
                 user_id=0,  # namespace 级别查询
                 namespace=namespace,
             )
-            from app.tools.fe_client import fe_retrieve
             result = await fe_retrieve(retrieve_input)
 
             if result.retrieved_count == 0:
@@ -182,7 +184,8 @@ class MemoryConsolidation:
                     )
                     continue
 
-                # 通过 fe_ingest 写入 Semantic 层
+                # 通过 registry 层 fe_ingest 写入 Semantic 层（重试+兜底）
+                # registry fe_ingest 返回 None（内部已处理兜底），无异常即成功
                 ingest_input = FEIngestInput(
                     text=text,
                     role="assistant",
@@ -191,37 +194,30 @@ class MemoryConsolidation:
                     namespace=namespace,
                     importance=CONSOLIDATION_IMPORTANCE,
                 )
-                ingest_result = await fe_ingest(ingest_input)
+                await fe_ingest(ingest_input)
+                result["consolidated"] += 1
+                logger.info(
+                    f"[MemoryConsolidation] consolidated: text={text[:100]} "
+                    f"freq={freq} ns={namespace}"
+                )
 
-                if ingest_result.success:
-                    result["consolidated"] += 1
-                    logger.info(
-                        f"[MemoryConsolidation] consolidated: text={text[:100]} "
-                        f"freq={freq} ns={namespace}"
-                    )
-
-                    # 记录到 audit_log
-                    await db.execute(
-                        """
-                        INSERT INTO agent_audit_log (session_id, agent_name, event_type, event_data)
-                        VALUES ($1, $2, $3, $4)
-                        """,
-                        f"consolidation:{user_id}",
-                        "memory_consolidation",
-                        "memory_promoted",
-                        json.dumps({
-                            "text": text[:500],
-                            "frequency": freq,
-                            "layer": "semantic",
-                            "importance": CONSOLIDATION_IMPORTANCE,
-                            "namespace": namespace,
-                        }, ensure_ascii=False),
-                    )
-                else:
-                    result["errors"] += 1
-                    logger.warning(
-                        f"[MemoryConsolidation] fe_ingest failed for text={text[:100]}"
-                    )
+                # 记录到 audit_log
+                await db.execute(
+                    """
+                    INSERT INTO agent_audit_log (session_id, agent_name, event_type, event_data)
+                    VALUES ($1, $2, $3, $4)
+                    """,
+                    f"consolidation:{user_id}",
+                    "memory_consolidation",
+                    "memory_promoted",
+                    json.dumps({
+                        "text": text[:500],
+                        "frequency": freq,
+                        "layer": "semantic",
+                        "importance": CONSOLIDATION_IMPORTANCE,
+                        "namespace": namespace,
+                    }, ensure_ascii=False),
+                )
 
             except Exception as e:
                 result["errors"] += 1

@@ -154,10 +154,33 @@ class DiagnosisAgent(BaseAgent):
         current_step = ctx.agent_state.get("diagnosis_step", 0)
         answers: dict[str, str] = ctx.agent_state.get("diagnosis_answers", {})
 
-        # 如果不是第一步，记录当前步骤的答案
+        # 如果不是第一步，记录当前步骤的答案 (S6-09: 校验答案合法性)
         if current_step > 0 and current_step <= len(DIAGNOSIS_STEPS):
             step_key = DIAGNOSIS_STEPS[current_step - 1]["key"]
-            answers[step_key] = input
+            valid_options = DIAGNOSIS_STEPS[current_step - 1]["options"]
+            # S6-09: 允许 A/B/C/D 字母选择或完整的选项文本
+            letter_map: dict[str, str] = {}
+            for i, opt in enumerate(valid_options):
+                letter_map[chr(65 + i)] = opt
+                letter_map[chr(97 + i)] = opt  # 小写也接受
+            if input.strip() in letter_map:
+                answers[step_key] = letter_map[input.strip()]
+            elif input.strip() in valid_options:
+                answers[step_key] = input.strip()
+            else:
+                # 非法输入 → 返回提示，不推进步骤
+                options_text = "\n".join(f"{chr(65 + i)}. {opt}" for i, opt in enumerate(valid_options))
+                return AgentResult(
+                    state={
+                        "diagnosis_step": current_step,
+                        "diagnosis_answers": answers,
+                        "current_agent": "diagnosis",
+                        "step_started_at": _now(),
+                    },
+                    reply=f"请选择 A/B/C/D 中的一个哦~\n\n{DIAGNOSIS_STEPS[current_step - 1]['question']}\n\n{options_text}",
+                    events=events,
+                    done=False,
+                )
 
         # 行进到下一步
         current_step += 1
@@ -298,7 +321,7 @@ class DiagnosisAgent(BaseAgent):
             for rec in report["recommendations"]:
                 reply_lines.append(f"  • {rec}")
 
-        return AgentResult(
+        result = AgentResult(
             state={
                 "diagnosis_step": 7,
                 "diagnosis_answers": answers,
@@ -310,7 +333,14 @@ class DiagnosisAgent(BaseAgent):
             done=True,
         )
 
+        # S6-01: 异步触发 Reflection
+        import asyncio as _asyncio
+        from app.agents.reflection import trigger_reflection_async as _ref_async
+        _asyncio.create_task(_ref_async(ctx, result, "问卷师"))
+
+        return result
+
 
 def _now() -> str:
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat()
+    from app.agents.shared_util import now_iso
+    return now_iso()

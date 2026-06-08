@@ -35,12 +35,13 @@ async def with_retry(
     **kwargs,
 ):
     """
-    按工具名称配置的重试策略执行异步函数。
+    按工具名称配置的重试策略执行异步函数。S5-12: 指数退避。
+    重试间隔 = base_delay * (2 ** retry_count)
     重试 N 次后仍失败 → 返回 None（由调用方决定兜底逻辑）
     """
     cfg = RETRY_CONFIG.get(tool_name, {"max_retries": 0, "delay_s": 0.0})
     max_retries = cfg["max_retries"]
-    delay_s = cfg["delay_s"]
+    base_delay_s = cfg["delay_s"]
 
     last_error = None
     for attempt in range(max_retries + 1):
@@ -49,11 +50,13 @@ async def with_retry(
         except Exception as e:
             last_error = e
             if attempt < max_retries:
+                # S5-12: 指数退避 — delay = base * (2 ** retry_count)
+                exponential_delay = base_delay_s * (2 ** attempt) if base_delay_s > 0 else 0.0
                 logger.warning(
                     f"[{tool_name}] attempt {attempt + 1}/{max_retries + 1} failed: {e}, "
-                    f"retrying in {delay_s}s..."
+                    f"retrying in {exponential_delay:.1f}s (exponential backoff)..."
                 )
-                await asyncio.sleep(delay_s)
+                await asyncio.sleep(exponential_delay)
             else:
                 logger.error(
                     f"[{tool_name}] all {max_retries + 1} attempts failed: {e}"

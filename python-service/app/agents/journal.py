@@ -66,12 +66,18 @@ class AgentJournal:
     def _get_week_range(self) -> tuple[datetime, datetime]:
         """
         计算本周范围：最近一个周日 00:00 UTC 到当前时间。
+
+        S8-07 修复: 周日触发时，days_since_sunday=0 → 改为 7，回退到上周日，
+        确保窗口覆盖完整的上周一~周日。
         """
         now = datetime.now(timezone.utc)
-        # 计算最近的周日 00:00
-        days_since_sunday = now.weekday() + 1  # Monday=0 -> +1, Sunday=6 -> 0+1=1
-        if days_since_sunday >= 7:
-            days_since_sunday = 0  # Sunday
+        # Monday=0, Sunday=6
+        # Monday: +1=1 (回退1天=周日), ... Saturday: +1=7→0 (回退0天), Sunday: 6+1=7→0 (回退0天=今天)
+        # 修正: Sunday 时 days_since_sunday=0，应改为 7 回退到上周日
+        if now.weekday() == 6:
+            days_since_sunday = 7  # Sunday → 回退到上周日
+        else:
+            days_since_sunday = now.weekday() + 1  # Mon=1, Tue=2, ..., Sat=6
         last_sunday = now - timedelta(days=days_since_sunday)
         week_start = last_sunday.replace(hour=0, minute=0, second=0, microsecond=0)
         return week_start, now

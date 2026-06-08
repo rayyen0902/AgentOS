@@ -249,7 +249,7 @@ class WorkshopAgent(BaseAgent):
         conflicts_list = card_data.get("conflicts", conflicts_list)
         routine_tip = card_data.get("routine_tip", "")
 
-        # 补充产品额外信息（价格、图片等从 DB 获取）
+        # 补充产品额外信息 (S6-11: 从 DB 查询真实 price/image_url)
         enriched_products: list[dict] = []
         for product in products_list:
             enriched = {
@@ -262,6 +262,22 @@ class WorkshopAgent(BaseAgent):
                 "key_ingredients": product.get("key_ingredients", []),
                 "image_url": product.get("image_url", ""),
             }
+            # S6-11: 从 DB 查询产品附加信息（价格、图片）
+            pid = enriched["id"]
+            if pid and pid > 0:
+                try:
+                    from db_util import db
+                    row = await db.fetchrow(
+                        "SELECT price, image_url FROM products WHERE id = $1",
+                        pid,
+                    )
+                    if row:
+                        if enriched["price"] == 0:
+                            enriched["price"] = float(row.get("price") or 0)
+                        if not enriched["image_url"]:
+                            enriched["image_url"] = row.get("image_url") or ""
+                except Exception as db_err:
+                    logger.warning(f"[workshop] DB enrichment for product {pid}: {db_err}")
             enriched_products.append(enriched)
 
         card = CardPayload(
@@ -317,30 +333,13 @@ class WorkshopAgent(BaseAgent):
                 importance=0.7,
             )
 
-        # 构造回复文本
-        if interrupt:
-            reply = interrupt.question
-        elif enriched_products:
-            lines = ["根据您的肤质和需求，为您推荐以下产品：\n"]
-            for i, p in enumerate(enriched_products, 1):
-                reason_str = p.get("reason", "")
-                lines.append(f"{i}. **{p['name']}**（{p.get('brand', '')}）")
-                if reason_str:
-                    lines.append(f"   {reason_str}")
-                if p.get("key_ingredients"):
-                    lines.append(f"   核心成分: {', '.join(p['key_ingredients'][:4])}")
-                lines.append("")
-            if routine_tip:
-                lines.append(f"💡 {routine_tip}")
-            reply = "\n".join(lines)
-        else:
-            reply = "暂时未找到完全匹配的产品，您可以补充更多肤质信息，我会重新为您挑选~"
-
-        return AgentResult(
+        # ── S6-01: 异步触发 Reflection ──
+        result = AgentResult(
             state={
                 "phase": "interrupted" if interrupt else "completed",
                 "step": 7,
                 "current_agent": "workshop",
+                "original_query": input,  # S6-10: 保存原始 query 供 resume 使用
             },
             reply=reply,
             interrupt=interrupt,
@@ -348,14 +347,19 @@ class WorkshopAgent(BaseAgent):
             card=card,
             done=interrupt is None,
         )
+        import asyncio as _asyncio
+        from app.agents.reflection import trigger_reflection_async as _ref_async
+        _asyncio.create_task(_ref_async(ctx, result, "配药师"))
+        return result
 
     async def resume(self, ctx: SessionContext, reply: str) -> AgentResult:
         """中断恢复: 用户确认成分过敏 → 重新推荐或继续"""
         events: list[StatusEvent] = []
         seq = 0
 
-        # 检查用户选择
-        exclude_conflicts = "排除" in reply or "重新推荐" in reply
+        # 检查用户选择 (S6-10: 超时自动 resume 用"继续（默认）"时不走排除分支)
+        is_default_resume = reply == "继续（默认）" or reply == "继续"
+        exclude_conflicts = not is_default_resume and ("排除" in reply or "重新推荐" in reply)
 
         if exclude_conflicts:
             # 重新搜索，排除冲突成分
@@ -365,8 +369,9 @@ class WorkshopAgent(BaseAgent):
                 created_at=_now(),
             ))
 
-            # 简化: 修改 input 加入排除提示，递归调用 run
-            modified_input = f"{ctx.input} (排除高风险冲突成分)"
+            # S6-10: 使用 ctx.input 原始用户需求（非"继续（默认）"）
+            original_input = ctx.agent_state.get("original_query", ctx.input)
+            modified_input = f"{original_input} (排除高风险冲突成分)"
             result = await self.run(ctx, modified_input)
             result.events = events + result.events
             return result
@@ -403,5 +408,5 @@ class WorkshopAgent(BaseAgent):
 
 
 def _now() -> str:
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat()
+    from app.agents.shared_util import now_iso
+    return now_iso()

@@ -175,20 +175,22 @@ class PhotoAnalystAgent(BaseAgent):
             for r in recommendations[:3]:
                 reply_lines.append(f"  • {r}")
 
-        # 可中断: 确认是否深入分析
-        interrupt = InterruptRequest(
-            type="deep_analysis",
-            question="是否需要我针对某个具体问题进行更深入的分析？（如：毛孔、色斑、出油等）",
-            options=["深入分析毛孔问题", "深入分析色素问题", "深入分析出油问题", "不需要，这样就好"],
-            timeout_s=300,
-            created_at=_now(),
-        )
-
-        events.append(StatusEvent(
-            seq=seq + 1, source="agent:photo_analyst",
-            status="done", label="等待用户确认是否深入分析",
-            created_at=_now(),
-        ))
+        # ── 可中断: 仅在分析发现显著问题时追问深入分析 (S6-14) ──
+        interrupt = None
+        has_significant_concerns = bool(concerns) and len(concerns) > 0
+        if has_significant_concerns:
+            interrupt = InterruptRequest(
+                type="deep_analysis",
+                question="是否需要我针对某个具体问题进行更深入的分析？（如：毛孔、色斑、出油等）",
+                options=["深入分析毛孔问题", "深入分析色素问题", "深入分析出油问题", "不需要，这样就好"],
+                timeout_s=300,
+                created_at=_now(),
+            )
+            events.append(StatusEvent(
+                seq=seq + 1, source="agent:photo_analyst",
+                status="done", label="等待用户确认是否深入分析",
+                created_at=_now(),
+            ))
 
         # 写入记忆
         memory_namespace = f"tenant:{ctx.tenant_id}:agent:photo_analyst"
@@ -201,9 +203,10 @@ class PhotoAnalystAgent(BaseAgent):
             importance=0.7,
         )
 
-        return AgentResult(
+        # S6-01: 异步触发 Reflection (仅分析完成时)
+        result = AgentResult(
             state={
-                "phase": "interrupted",
+                "phase": "interrupted" if interrupt else "completed",
                 "current_agent": "photo_analyst",
                 "analysis": analysis,
             },
@@ -211,14 +214,28 @@ class PhotoAnalystAgent(BaseAgent):
             interrupt=interrupt,
             events=events,
             card=card,
-            done=False,
+            done=interrupt is None,
         )
+        import asyncio as _asyncio
+        from app.agents.reflection import trigger_reflection_async as _ref_async
+        _asyncio.create_task(_ref_async(ctx, result, "识肤师"))
+        return result
 
     async def resume(self, ctx: SessionContext, reply: str) -> AgentResult:
         """中断恢复: 用户确认深入分析方向"""
         events: list[StatusEvent] = []
 
         if "不需要" in reply:
+            # 写入记忆记录用户的选择 (S6-16)
+            memory_namespace = f"tenant:{ctx.tenant_id}:agent:photo_analyst"
+            await fe_ingest(
+                text=f"[interrupt] deep_analysis declined by user: {reply}",
+                role="assistant",
+                session_id=ctx.session_id,
+                user_id=ctx.user_id,
+                namespace=memory_namespace,
+                importance=0.4,
+            )
             return AgentResult(
                 state={"phase": "completed", "current_agent": None},
                 reply="好的，以上是您的皮肤分析结果。如有其他问题随时问我哦~",
@@ -265,13 +282,11 @@ class PhotoAnalystAgent(BaseAgent):
         )
 
     async def _call_vl_model(self, image_url: str, prompt: str) -> str:
-        """调用 VL (Vision Language) 模型"""
-        from openai import AsyncOpenAI
+        """调用 VL (Vision Language) 模型，带指数退避重试和超时控制"""
+        import asyncio
+        from app.agents.llm_util import get_client
 
-        client = AsyncOpenAI(
-            api_key=settings.LLM_API_KEY,
-            base_url=settings.LLM_BASE_URL,
-        )
+        client = get_client()  # S6-02: 复用全局连接池
 
         messages = [
             {
@@ -287,16 +302,38 @@ class PhotoAnalystAgent(BaseAgent):
             },
         ]
 
-        response = await client.chat.completions.create(
-            model=settings.LLM_VL_MODEL,
-            messages=messages,
-            temperature=0.3,
-            max_tokens=1024,
-            response_format={"type": "json_object"},
-        )
-        return response.choices[0].message.content or "{}"
+        # S6-18: VL 模型也带重试逻辑（指数退避 1s, 2s, 4s）
+        retry_delays = [1.0, 2.0, 4.0]
+        last_error = None
+
+        for attempt in range(len(retry_delays) + 1):
+            try:
+                # S6-03: asyncio.wait_for 防止永久挂起
+                response = await asyncio.wait_for(
+                    client.chat.completions.create(
+                        model=settings.LLM_VL_MODEL,
+                        messages=messages,
+                        temperature=0.3,
+                        max_tokens=1024,
+                        response_format={"type": "json_object"},
+                    ),
+                    timeout=30.0,
+                )
+                return response.choices[0].message.content or "{}"
+            except asyncio.TimeoutError:
+                last_error = "VL model timeout after 30s"
+                logger.warning(f"[photo_analyst] VL timeout (attempt {attempt + 1})")
+            except Exception as e:
+                last_error = str(e)
+                logger.warning(f"[photo_analyst] VL error (attempt {attempt + 1}): {e}")
+
+            if attempt < len(retry_delays):
+                await asyncio.sleep(retry_delays[attempt])
+
+        logger.error(f"[photo_analyst] VL all retries exhausted: {last_error}")
+        raise Exception(f"VL model unavailable: {last_error}")
 
 
 def _now() -> str:
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat()
+    from app.agents.shared_util import now_iso
+    return now_iso()

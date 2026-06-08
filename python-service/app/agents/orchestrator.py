@@ -95,12 +95,59 @@ ROUTING_TABLE: dict[str, str | None] = {
 async def run_orchestrator(ctx: SessionContext, input: str) -> AgentResult:
     """
     前台 Agent 主流程:
+    0. 入口 stage 检查 (S6-04 escalated / S6-12 agent_running / S6-13 agent_interrupted)
     1. 意图分类 (Flash LLM, 3s 超时)
     2. 若 confidence < 0.6 → 直接对话澄清
     3. 根据路由表委派子 Agent 或调用 Tool 或自行回复
     """
     events: list[StatusEvent] = []
     t_start = time.time()
+
+    # ── S6-04: 入口检查 escalated 状态 ──
+    stage = ctx.agent_state.get("stage", "idle")
+    if stage == "escalated":
+        events.append(StatusEvent(
+            seq=0, source="agent:orchestrator",
+            status="done", label="已转人工，消息仅记录",
+            created_at=_now(),
+        ))
+        return AgentResult(
+            state={"phase": "escalated", "stage": "escalated"},
+            reply="您的问题已转接至人工客服，请耐心等待。如需继续使用 AI 服务，请重新开始会话~",
+            events=events,
+            done=True,
+        )
+
+    # ── S6-12: agent_running 时，所有消息（含直接 Tool）统一丢弃 ──
+    if stage == "agent_running":
+        events.append(StatusEvent(
+            seq=0, source="agent:orchestrator",
+            status="done", label="Agent 正忙，消息被丢弃",
+            created_at=_now(),
+        ))
+        return AgentResult(
+            state={"phase": "busy"},
+            reply="正在处理上一条消息，稍等~",
+            events=events,
+            done=True,
+        )
+
+    # ── S6-13: agent_interrupted 时，发 chat 消息清理中断状态 ──
+    if stage == "agent_interrupted":
+        # 先做意图分类判断
+        intent_result = await classify_intent(input)
+        intent = intent_result.get("intent", "chat")
+        if intent == "chat":
+            # 用户发聊天消息，清理中断状态
+            return AgentResult(
+                state={"stage": "idle", "current_agent": None},
+                reply="好的，已退出当前任务。有什么可以帮您的吗？~",
+                events=events,
+                done=True,
+            )
+        # 非 chat → 正常 resume 流程
+        agent_type = ctx.agent_state.get("current_agent", "")
+        return await resume_agent(ctx, agent_type, input, events, 0)
 
     # Step 1: 意图分类
     seq = 0
@@ -339,6 +386,31 @@ async def _delegate_to_agent(
         # 中断恢复 → 路由至 agent.resume()
         return await resume_agent(ctx, agent_type, input, events, seq)
 
+    # ── S6-05: 子 Agent 启动前调 escalate 检查 ──
+    from app.agents.escalation import check_and_escalate
+    escal_result, is_escalated = await check_and_escalate(
+        ctx.session_id, input,
+    )
+    if is_escalated and escal_result.should_block:
+        events.append(StatusEvent(
+            seq=seq + 1, source="agent:orchestrator",
+            status="done", label=f"触发人工升级: {escal_result.matched_rule}",
+            created_at=_now(),
+        ))
+        return AgentResult(
+            state={"stage": "escalated", "current_agent": None},
+            reply=escal_result.reply_override or "您的问题已转接至人工客服，请稍候~",
+            events=events,
+            done=True,
+        )
+    if escal_result.action.value == "reject_and_advise":
+        return AgentResult(
+            state={"stage": "idle", "current_agent": None},
+            reply=escal_result.reply_override or "护肤品不能替代药品，建议咨询皮肤科医生获取专业诊断。",
+            events=events,
+            done=True,
+        )
+
     # 正常委派
     agents_map = {
         "workshop": WorkshopAgent(),
@@ -488,5 +560,5 @@ async def resume_agent(
 
 
 def _now() -> str:
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat()
+    from app.agents.shared_util import now_iso
+    return now_iso()

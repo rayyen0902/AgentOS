@@ -26,6 +26,11 @@ def get_client() -> AsyncOpenAI:
     return _client
 
 
+def _now() -> str:
+    from app.agents.shared_util import now_iso
+    return now_iso()
+
+
 async def llm_chat(
     model: str,
     system_prompt: str,

@@ -86,11 +86,28 @@ def check_diagnosis_step_timeout(agent_state: dict) -> dict | None:
 
 def check_diagnosis_quit(input_text: str, agent_state: dict) -> bool:
     """
-    检测问卷师中途用户是否发了非问卷相关消息。
-    若用户输入暗示退出问卷（如"不做了""算了""推荐产品"等），返回 True。
+    检测问卷师中途用户是否发了退出关键词 (S6-07/S6-08)。
+
+    返回 True 表示用户要求退出，需要二次确认。
+
+    S6-08: 当 quit_confirmed 为 False 时，调用方应发送确认消息而非直接退出。
+    当 quit_confirmed 为 True 时，确认退出。
     """
     if agent_state.get("current_agent") != "diagnosis":
         return False
 
-    quit_keywords = ["退出", "不做了", "算了", "取消", "停止", "推荐", "买什么", "换一个"]
-    return any(kw in input_text for kw in quit_keywords)
+    # S6-07: 移除过于宽泛的 "推荐" 关键词
+    quit_keywords = ["退出", "不做了", "算了", "取消", "停止", "买什么", "换一个"]
+    keyword_hit = any(kw in input_text for kw in quit_keywords)
+
+    # S6-08: 二次确认 — 若用户说 "是" 或 "确认" 且之前已标记 quit_pending
+    if agent_state.get("quit_pending"):
+        if any(w in input_text for w in ["是", "确认", "对", "退出", "Yes", "yes"]):
+            return True  # 确认退出
+
+    # 首次触发 → 设置 quit_pending 标记，由调用方发送确认消息 (不清空 agent_state)
+    if keyword_hit:
+        logger.info(f"[diagnosis_quit] quit keyword detected: '{input_text}', asking confirmation")
+        return True  # S6-08: 调用方应判断 quit_pending，发送确认提示
+
+    return False

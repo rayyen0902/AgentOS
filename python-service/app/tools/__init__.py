@@ -21,4 +21,5 @@ from app.tools.models import (
     ProductCRUDInput, ProductCRUDOutput, ProductItem,
     ProfileQueryInput, ProfileQueryOutput,
 )
-from app.tools.consolidation import run_consolidation
+# S5-13: Memory Consolidation 实现在 app/agents/memory_consolidation.py
+from app.agents.memory_consolidation import MemoryConsolidation, trigger_memory_consolidation_async

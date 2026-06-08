@@ -12,6 +12,8 @@ class Settings:
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
     DATABASE_URL: str = os.getenv("DATABASE_URL", "")
+    DB_POOL_MIN_SIZE: int = int(os.getenv("DB_POOL_MIN_SIZE", "2"))
+    DB_POOL_MAX_SIZE: int = int(os.getenv("DB_POOL_MAX_SIZE", "10"))
     REDIS_URL: str = os.getenv("REDIS_URL", "")
 
     LLM_FLASH_MODEL: str = os.getenv("LLM_FLASH_MODEL", "qwen-turbo")
@@ -26,7 +28,8 @@ class Settings:
 
     FE_GRPC_HOST: str = os.getenv("FE_GRPC_HOST", "knownot.cc")
     FE_GRPC_PORT: str = os.getenv("FE_GRPC_PORT", "50052")
-    FE_GRPC_TIMEOUT: str = os.getenv("FE_GRPC_TIMEOUT", "5s")
+    FE_GRPC_TIMEOUT: float = float(os.getenv("FE_GRPC_TIMEOUT", "5").replace("s", ""))  # S5-10: 统一解析为秒数
+    FE_KIN_ID: str = os.getenv("FE_KIN_ID", "")
 
     TRACE_ENABLED: bool = os.getenv("TRACE_ENABLED", "true").lower() == "true"
     TRACE_SAMPLE_RATE: float = float(os.getenv("TRACE_SAMPLE_RATE", "1.0"))
@@ -43,7 +46,8 @@ class Settings:
         if cls.ENV not in ("production", "staging", "development"):
             errors.append(f"ENV must be one of production|staging|development, got: {cls.ENV}")
         if cls.EMBEDDING_DIMS != 1024:
-            errors.append(f"EMBEDDING_DIMS must be 1024, got: {cls.EMBEDDING_DIMS}")
+            import warnings
+            warnings.warn(f"EMBEDDING_DIMS is {cls.EMBEDDING_DIMS}, expected 1024. Proceeding anyway.")  # S5-15: warning not hard error
         return errors
 
 

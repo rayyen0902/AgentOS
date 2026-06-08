@@ -233,12 +233,12 @@ async def llm_verify_escalation(
 
     except (json.JSONDecodeError, KeyError) as e:
         logger.warning(f"[Escalation] LLM verify parse error: {e}")
-        # 解析失败时，如果关键词命中 → 保守处理，确认触发
-        return True
+        # 解析失败时保守处理：不升级，避免 LLM 误判
+        return False
     except Exception as e:
         logger.error(f"[Escalation] LLM verify failed: {e}")
-        # LLM 调用失败时，如果关键词命中 → 保守处理，确认触发
-        return True
+        # LLM 调用失败时保守处理：不升级，避免 LLM 不可用导致误升级
+        return False
 
 
 # ============================================================

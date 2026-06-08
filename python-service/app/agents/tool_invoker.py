@@ -121,7 +121,7 @@ async def _fe_ingest_impl(
     namespace: str,
     importance: float,
 ) -> FEIngestOutput:
-    """实际 fe_ingest 调用"""
+    """实际 fe_ingest 调用 — 失败直接返回，不推队列 (S5-07: 无 worker 消费)"""
     from config import settings
     import httpx
     import uuid
@@ -148,21 +148,8 @@ async def _fe_ingest_impl(
     except Exception as e:
         logger.warning(f"[fe_ingest] gRPC/HTTP failed: {e}")
 
-    # 降级: 进入本地队列稍后重试 (6.6: FE gRPC 不可用 → fe_ingest 进入本地队列)
-    queue_key = "ingest_queue"
-    await redis_client._client.lpush(
-        redis_client._build_key(queue_key),
-        json.dumps({
-            "text": text,
-            "role": role,
-            "session_id": session_id,
-            "user_id": user_id,
-            "namespace": namespace,
-            "importance": importance,
-        }, ensure_ascii=False),
-    )
-    logger.info(f"[fe_ingest] queued for retry: {session_id}")
-    return FEIngestOutput(msg_id="queued", success=False)
+    # 失败直接返回，不阻断主流程（不再推未消费的 ingest_queue）
+    return FEIngestOutput(msg_id="", success=False)
 
 
 async def fe_ingest(
@@ -192,83 +179,12 @@ async def _rag_search_impl(
     top_k: int,
     search_type: str,
 ) -> RAGSearchOutput:
-    """实际 rag_search 调用 — PG hybrid_search"""
-    from db_util import db
-
-    try:
-        # 先尝试 hybrid search → pgvector + keyword
-        if search_type in ("hybrid", "semantic"):
-            from app.tools.embedding import embed
-            embedding = await embed(query)
-            rows = await db.fetch(
-                """
-                SELECT id, name, brand, category, ingredients, description,
-                       (1.0 - (embedding <=> $1)) AS score
-                FROM products
-                WHERE tenant_id = $2 AND embedding IS NOT NULL
-                ORDER BY embedding <=> $1
-                LIMIT $3
-                """,
-                str(embedding), tenant_id, top_k,
-            )
-        else:
-            # keyword only
-            rows = await db.fetch(
-                """
-                SELECT id, name, brand, category, ingredients, description, 0.0 AS score
-                FROM products
-                WHERE tenant_id = $1
-                  AND (name ILIKE '%' || $2 || '%' OR description ILIKE '%' || $2 || '%')
-                LIMIT $3
-                """,
-                tenant_id, query, top_k,
-            )
-
-        items = [
-            KnowledgeItem(
-                id=row["id"],
-                name=row["name"],
-                brand=row.get("brand", ""),
-                category=row.get("category", ""),
-                ingredients=row.get("ingredients", []) or [],
-                description=row.get("description", ""),
-                score=float(row.get("score", 0.0)),
-            )
-            for row in rows
-        ]
-        return RAGSearchOutput(items=items, total=len(items))
-
-    except Exception as e:
-        logger.warning(f"[rag_search] DB query failed: {e}")
-        # pgvector 索引损坏 → 降级为仅 keyword 检索 (6.6)
-        try:
-            rows = await db.fetch(
-                """
-                SELECT id, name, brand, category, ingredients, description, 0.0 AS score
-                FROM products
-                WHERE tenant_id = $1
-                  AND (name ILIKE '%' || $2 || '%' OR description ILIKE '%' || $2 || '%')
-                LIMIT $3
-                """,
-                tenant_id, query, top_k,
-            )
-            items = [
-                KnowledgeItem(
-                    id=row["id"],
-                    name=row["name"],
-                    brand=row.get("brand", ""),
-                    category=row.get("category", ""),
-                    ingredients=row.get("ingredients", []) or [],
-                    description=row.get("description", ""),
-                    score=float(row.get("score", 0.0)),
-                )
-                for row in rows
-            ]
-            return RAGSearchOutput(items=items, total=len(items))
-        except Exception as e2:
-            logger.error(f"[rag_search] keyword fallback also failed: {e2}")
-
-    return RAGSearchOutput(items=[], total=0)
+    """委托给 rag_tool.py 的 rag_search（S5-08: 消重，统一走 rag_tool RRF 融合）"""
+    from app.tools.rag_tool import rag_search as _rag_search_raw
+    input = RAGSearchInput(
+        query=query, tenant_id=tenant_id, top_k=top_k, search_type=search_type,  # type: ignore
+    )
+    return await _rag_search_raw(input)
 
 
 async def rag_search(
@@ -288,57 +204,20 @@ async def rag_search(
     return result
 
 
+# S5-08: rag_conflict 统一委托 rag_tool.py，消重双实现
 async def _rag_conflict_impl(
     ingredients: list[str],
     user_id: int,
     check_types: list[str],
 ) -> RAGConflictOutput:
-    """实际 rag_conflict 调用"""
-    from db_util import db
-
-    if not ingredients:
-        return RAGConflictOutput(conflicts=[], has_urgent=False)
-
-    try:
-        # 查询冲突表
-        placeholders = ", ".join(f"${i + 1}" for i in range(len(ingredients)))
-        rows = await db.fetch(
-            f"""
-            SELECT DISTINCT ON (pc.id)
-                pc.conflict_type, pc.severity, pc.description,
-                pc.ingredients_involved, pc.suggestion
-            FROM knowledge.product_conflicts pc
-            JOIN products p ON pc.product_a_id = p.id OR pc.product_b_id = p.id
-            WHERE pc.severity = 'high'
-               OR (
-                   pc.conflict_type = ANY(${len(ingredients) + 1})
-                   AND pc.severity IN ('high', 'medium', 'low')
-               )
-            ORDER BY pc.id, pc.severity
-            LIMIT 10
-            """,
-            *ingredients,
-            check_types,
-        )
-
-        conflicts = [
-            ConflictItem(
-                conflict_type=row["conflict_type"],
-                severity=row["severity"],
-                description=row["description"],
-                ingredients_involved=row.get("ingredients_involved", []) or [],
-                suggestion=row.get("suggestion", ""),
-            )
-            for row in rows
-        ]
-        has_urgent = any(c.severity == "high" for c in conflicts)
-        return RAGConflictOutput(conflicts=conflicts, has_urgent=has_urgent)
-
-    except Exception as e:
-        logger.warning(f"[rag_conflict] DB query failed: {e}")
-
-    # 失败兜底: 返回 has_urgent=false
-    return RAGConflictOutput(conflicts=[], has_urgent=False)
+    from app.tools.rag_tool import rag_conflict as _rag_conflict_raw
+    from app.tools.models import RAGConflictInput
+    input = RAGConflictInput(
+        ingredients=ingredients,
+        user_id=user_id,
+        check_types=check_types,
+    )
+    return await _rag_conflict_raw(input)
 
 
 async def rag_conflict(
@@ -509,8 +388,10 @@ async def _profile_query_impl(
     try:
         row = await db.fetchrow(
             """
-            SELECT skin_type, skin_concerns, allergies, current_products, profile_completeness
-            FROM user_profiles
+            SELECT skin_type, concerns AS skin_concerns, allergies,
+                   NULL AS current_products,
+                   CASE WHEN skin_type IS NOT NULL THEN 0.75 ELSE 0.0 END AS profile_completeness
+            FROM skin_profiles
             WHERE user_id = $1
             """,
             user_id,

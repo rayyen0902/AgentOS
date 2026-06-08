@@ -76,12 +76,12 @@ def should_trigger_reflection(result: AgentResult, agent_name: str) -> bool:
         logger.info(f"[Reflection] trigger: card_type={result.card.type}")
         return True
 
-    # 问卷师 7 步完成（通过 state 中的 phase/step 判断）
+    # 问卷师 7 步完成（通过 state 中的 diagnosis_step 字段判断）
+    # S8-08 修复: diagnosis_agent 存在 agent_state["diagnosis_step"]，不是 state.phase/step
     if agent_name in ("diagnosis", "问卷师"):
-        phase = result.state.get("phase", "")
-        step = result.state.get("step", 0)
-        if phase == "completed" and step >= 7:
-            logger.info(f"[Reflection] trigger: diagnosis completed 7+ steps")
+        diagnosis_step = result.state.get("diagnosis_step", 0)
+        if diagnosis_step >= 7:
+            logger.info(f"[Reflection] trigger: diagnosis completed 7+ steps (diagnosis_step={diagnosis_step})")
             return True
 
     # 其他 case（包括前台直出）→ 不触发
@@ -257,7 +257,7 @@ class ReflectionAgent:
                 VALUES ($1, $2, $3, $4)
                 """,
                 ctx.session_id,
-                "reflection",
+                f"reflection:{agent_name}",     # S8-09 修复: 记录具体 agent_name 而非硬编码 "reflection"
                 "reflection_complete",
                 json.dumps(event_data, ensure_ascii=False),
             )
