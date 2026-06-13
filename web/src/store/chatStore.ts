@@ -58,30 +58,39 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   clearRound: () => {
-    set({ statusStream: [], currentCard: null, errorEvent: null });
+    set({ statusStream: [], currentCard: null, errorEvent: null, isProcessing: false });
   },
 
   replyInterrupt: async (option) => {
-    const { interrupt } = get();
-    if (!interrupt) return;
+    const { interrupt, isProcessing } = get();
+    if (!interrupt || isProcessing) return;
 
-    // S4-19: replyInterrupt 也带 auth header
+    // Prevent duplicate submissions by clearing interrupt immediately
+    const savedInterrupt = interrupt;
+    set({ interrupt: null, isProcessing: true });
+
     const token = localStorage.getItem('jwt');
-    const res = await fetch(`${import.meta.env.VITE_API_BASE_URL || ''}/api/v1/chat/interrupt`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-      body: JSON.stringify({
-        session_id: interrupt.session_id,
-        interrupt_id: interrupt.interrupt_id,
-        choice: option,
-      }),
-    });
+    try {
+      const res = await fetch(`${import.meta.env.VITE_API_BASE_URL || ''}/api/v1/chat/interrupt`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          session_id: savedInterrupt.session_id,
+          interrupt_id: savedInterrupt.interrupt_id,
+          choice: option,
+        }),
+      });
 
-    if (res.ok) {
-      set({ interrupt: null, isProcessing: true });
+      if (!res.ok) {
+        // Restore interrupt on failure so user can retry
+        set({ interrupt: savedInterrupt, isProcessing: false });
+      }
+    } catch {
+      // Network error — restore interrupt for retry
+      set({ interrupt: savedInterrupt, isProcessing: false });
     }
   },
 }));
