@@ -84,6 +84,9 @@ jobs:
 
       - name: Build web frontend
         working-directory: ./web
+        env:
+          VITE_BASE: /agentos/
+          VITE_API_BASE_URL: /agentos
         run: |
           npm install
           npm run build
@@ -112,8 +115,12 @@ jobs:
       - name: SCP web dist
         run: |
           sshpass -p "${{ secrets.SSH_PASSWORD }}" \
+            ssh -o StrictHostKeyChecking=no \
+              ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} \
+              "rm -rf /opt/agentos/web/dist/*"
+          sshpass -p "${{ secrets.SSH_PASSWORD }}" \
             scp -o StrictHostKeyChecking=no -r \
-              web/dist/ \
+              web/dist/. \
               ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/opt/agentos/web/dist/
 
       - name: SCP nginx config

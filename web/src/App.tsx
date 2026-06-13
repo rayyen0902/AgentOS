@@ -34,8 +34,9 @@ function WidgetPage() {
 }
 
 function App() {
+  const basename = import.meta.env.BASE_URL?.replace(/\/+$/, '') || '/';
   return (
-    <BrowserRouter>
+    <BrowserRouter basename={basename}>
       <Routes>
         <Route path="/" element={<ChatContainer />} />
         <Route path="/register" element={<RegisterWithRedirect />} />

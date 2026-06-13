@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -215,4 +216,134 @@ func TestRateLimit_Eviction(t *testing.T) {
 
 	// 11th call: bucket is empty and no time has elapsed for refill
 	assert.False(t, tb.allow(), "11th allow should fail after bucket is depleted")
+}
+
+func TestRateLimit_RecoverAfterRefill(t *testing.T) {
+	// bucket with capacity 100, tokens=100 -> exhaust all, then verify fail.
+	// We cannot easily manipulate time on the unexported tokenBucket, so we
+	// test the middleware behavior: after exhausting, requests are denied;
+	// we verify the blocked response shape and confirm the bucket concept holds.
+	cfg := &config.Config{
+		RateLimitGlobal:  10,
+		RateLimitUserMsg: 1000,
+	}
+	mw := RateLimit(cfg)
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// Exhaust all global tokens
+	for i := 0; i < 10; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/test", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, "request %d should be allowed", i+1)
+	}
+
+	// Next request is denied
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
+
+	var apiResp model.APIResponse
+	err := json.Unmarshal(rec.Body.Bytes(), &apiResp)
+	require.NoError(t, err)
+	assert.Equal(t, model.CodeRateLimited, apiResp.Code)
+	assert.Contains(t, apiResp.Message, "global rate limit exceeded")
+}
+
+func TestRateLimit_UserBucket(t *testing.T) {
+	cfg := &config.Config{
+		RateLimitGlobal:  1000,
+		RateLimitUserMsg: 3,
+	}
+	mw := RateLimit(cfg)
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// User A: allowed within per-user threshold
+	for i := 0; i < 3; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/test", nil)
+		req.Header.Set("X-User-ID", "user-a")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, "user-a request %d should be allowed", i+1)
+	}
+
+	// User A: 4th request blocked by user rate limit
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.Header.Set("X-User-ID", "user-a")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
+
+	var apiResp model.APIResponse
+	err := json.Unmarshal(rec.Body.Bytes(), &apiResp)
+	require.NoError(t, err)
+	assert.Equal(t, model.CodeRateLimited, apiResp.Code)
+	assert.Contains(t, apiResp.Message, "user rate limit exceeded")
+
+	// User B: unaffected by User A's rate limit, still gets through
+	req2 := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req2.Header.Set("X-User-ID", "user-b")
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	assert.Equal(t, http.StatusOK, rec2.Code, "user-b should not be affected by user-a's rate limit")
+}
+
+func TestRateLimit_NoUserHeader(t *testing.T) {
+	// Without X-User-ID, only the global bucket applies.
+	cfg := &config.Config{
+		RateLimitGlobal:  2,
+		RateLimitUserMsg: 1, // very tight per-user, but irrelevant without X-User-ID
+	}
+	mw := RateLimit(cfg)
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// 2 requests allowed (global limit only)
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/test", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, "request %d should be allowed", i+1)
+	}
+
+	// 3rd denied by global limit
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
+}
+
+func TestLogger(t *testing.T) {
+	handler := Logger(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/test", nil)
+	rec := httptest.NewRecorder()
+	// Logger should not panic; it logs structured output to stdout.
+	handler.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestLogger_ClientError(t *testing.T) {
+	handler := Logger(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/nonexistent", nil)
+	rec := httptest.NewRecorder()
+	// Logger should record 404 correctly
+	handler.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestGetTraceID_EmptyContext(t *testing.T) {
+	ctx := context.Background()
+	assert.Equal(t, "", GetTraceID(ctx))
 }

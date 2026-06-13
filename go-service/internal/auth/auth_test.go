@@ -321,3 +321,73 @@ func TestMiddleware_AdminAPIKey(t *testing.T) {
 	assert.True(t, called, "handler should be called with valid admin API key")
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
+
+func TestMiddleware_AdminInvalidKey(t *testing.T) {
+	cfg := &config.Config{
+		ENV:         "production",
+		AdminAPIKey: "my-secret-admin-key",
+	}
+	mw := Middleware(cfg)
+
+	called := false
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/users", nil)
+	req.Header.Set("X-API-Key", "wrong-key")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.False(t, called, "handler should NOT be called with invalid admin API key")
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+
+	var apiResp model.APIResponse
+	err := json.Unmarshal(rec.Body.Bytes(), &apiResp)
+	require.NoError(t, err)
+	assert.Equal(t, model.CodeAPIKeyInvalid, apiResp.Code)
+}
+
+func TestMiddleware_AdminKeyViaQueryParam(t *testing.T) {
+	cfg := &config.Config{
+		ENV:         "production",
+		AdminAPIKey: "my-secret-admin-key",
+	}
+	mw := Middleware(cfg)
+
+	called := false
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// Admin key passed as query param ?api_key=xxx
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/logs?api_key=my-secret-admin-key", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.True(t, called, "handler should be called with valid admin API key via query param")
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestMiddleware_WebhookWhitelist(t *testing.T) {
+	cfg := &config.Config{
+		ENV:       "production",
+		JWTSecret: "test-secret",
+	}
+	mw := Middleware(cfg)
+
+	called := false
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhook/stripe", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.True(t, called, "next handler should be called for whitelisted webhook path")
+	assert.Equal(t, http.StatusOK, rec.Code)
+}

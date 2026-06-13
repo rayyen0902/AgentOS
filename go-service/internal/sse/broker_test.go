@@ -1,9 +1,13 @@
 package sse
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -145,4 +149,56 @@ func TestRacePublishUnsubscribe(t *testing.T) {
 	}
 
 	wg.Wait()
+}
+
+func TestHandler(t *testing.T) {
+	b := NewBroker()
+	sessionID := "test-handler-session"
+
+	// Create an HTTP request with session_id query param.
+	req := httptest.NewRequest(http.MethodGet, "/sse?session_id="+sessionID, nil)
+
+	// Use a context with cancel to simulate client disconnect.
+	ctx, cancel := context.WithCancel(context.Background())
+	req = req.WithContext(ctx)
+
+	rr := httptest.NewRecorder()
+
+	// Run Handler in a goroutine since it blocks.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		b.Handler(rr, req)
+	}()
+
+	// Wait a short time for the connected event to be written.
+	time.Sleep(50 * time.Millisecond)
+
+	// Publish an event so the handler sends it over SSE.
+	b.Publish(sessionID, BuildEvent("test_event", `{"key":"value"}`))
+
+	// Give the handler time to receive and write the published event.
+	time.Sleep(50 * time.Millisecond)
+
+	// Cancel the context to trigger r.Context().Done() and clean up.
+	cancel()
+
+	// Wait for handler to exit before reading the response body (avoids data race).
+	<-done
+
+	// Now it's safe to read the response.
+	resp := rr.Result()
+	body := make([]byte, 2048)
+	n, _ := resp.Body.Read(body)
+	resp.Body.Close()
+
+	bodyStr := string(body[:n])
+	assert.Contains(t, bodyStr, "event: connected", "initial connected event should be sent")
+	assert.Contains(t, bodyStr, `"session_id":"`+sessionID+`"`, "connected event should contain session_id")
+	assert.Contains(t, bodyStr, "event: test_event", "published test_event should be received")
+
+	// Verify SSE headers are set.
+	assert.Equal(t, "text/event-stream", resp.Header.Get("Content-Type"))
+	assert.Equal(t, "no-cache", resp.Header.Get("Cache-Control"))
+	assert.Equal(t, "keep-alive", resp.Header.Get("Connection"))
 }
