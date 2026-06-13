@@ -62,7 +62,8 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	// Limit request body to 1MB to prevent OOM DoS
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	const maxBodySize = 1 << 20
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodySize)
 
 	var body struct {
 		SessionID string `json:"session_id"`
@@ -74,6 +75,12 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 		ImageSize int64  `json:"image_size,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			middleware.WriteJSON(w, model.CodeBadRequest,
+				model.NewErrorResponse(model.CodeBadRequest, fmt.Sprintf("request body too large (max %d bytes)", maxBodySize), traceID))
+			return
+		}
 		middleware.WriteJSON(w, model.CodeBadRequest,
 			model.NewErrorResponse(model.CodeBadRequest, fmt.Sprintf("invalid request body: %v", err), traceID))
 		return
@@ -91,13 +98,12 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ── Step 6 6.1: Acquire per-session lock ──
-	locked, err := h.Session.AcquireLock(ctx, body.SessionID, 30*time.Second)
-	if err != nil {
-		log.Printf("[WARN] agent_lock acquire error session=%s: %v", body.SessionID, err)
-		// Redis 不可用 → 降级为纯 PG 模式 (6.6 系统故障边界)
-		// Continue without lock — session state from PG
+	locked, lockErr := h.Session.AcquireLock(ctx, body.SessionID, 30*time.Second)
+	if lockErr != nil {
+		log.Printf("[WARN] agent_lock acquire error session=%s: %v (degraded — continuing without lock)", body.SessionID, lockErr)
+		// Redis 不可用 → 降级继续，不阻塞请求 (6.6 系统故障边界)
 	}
-	if !locked && err == nil {
+	if lockErr == nil && !locked {
 		// Lock held by another process — treat as agent_running
 		middleware.WriteJSON(w, 0,
 			model.NewSuccessResponse(map[string]interface{}{
@@ -114,7 +120,9 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() {
 		if locked {
-			h.Session.ReleaseLock(ctx, body.SessionID)
+			if relErr := h.Session.ReleaseLock(ctx, body.SessionID); relErr != nil {
+				log.Printf("[WARN] agent_lock release error session=%s: %v", body.SessionID, relErr)
+			}
 		}
 	}()
 

@@ -149,6 +149,15 @@ async def run_orchestrator(ctx: SessionContext, input: str) -> AgentResult:
             )
         # 非 chat → 正常 resume 流程
         agent_type = ctx.agent_state.get("current_agent", "")
+        if not agent_type or agent_type not in ROUTING_TABLE.values():
+            # agent_type 无效（空字符串或未知），回退到 idle
+            logger.warning(f"[orchestrator] agent_interrupted with invalid agent_type={agent_type!r}, resetting to idle")
+            return AgentResult(
+                state={"stage": "idle", "current_agent": None},
+                reply="已退出当前任务。有什么可以帮您的吗？~",
+                events=events,
+                done=True,
+            )
         return await resume_agent(ctx, agent_type, input, events, 0)
 
     # Step 1: 意图分类

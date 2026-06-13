@@ -63,8 +63,9 @@ func NewWithPlatforms(cfg *config.Config, sm *session.Manager, broker *sse.Broke
 }
 
 // pythonRequest is the shared low-level HTTP call for all Go→Python forwarding paths.
-// Uses a shared http.Client with connection pooling; custom timeout uses context.WithTimeout.
-func (h *Handler) pythonRequest(endpoint string, reqBody interface{}, timeout time.Duration) (map[string]interface{}, error) {
+// Uses a shared http.Client with connection pooling; timeout is derived from parentCtx
+// to propagate client cancellation (e.g., HTTP request context).
+func (h *Handler) pythonRequest(parentCtx context.Context, endpoint string, reqBody interface{}, timeout time.Duration) (map[string]interface{}, error) {
 	payload, err := json.Marshal(reqBody)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request body: %w", err)
@@ -75,9 +76,9 @@ func (h *Handler) pythonRequest(endpoint string, reqBody interface{}, timeout ti
 	var ctx context.Context
 	var cancel context.CancelFunc
 	if timeout > 0 {
-		ctx, cancel = context.WithTimeout(context.Background(), timeout)
+		ctx, cancel = context.WithTimeout(parentCtx, timeout)
 	} else {
-		ctx, cancel = context.WithTimeout(context.Background(), h.Config.PythonServiceTimeout)
+		ctx, cancel = context.WithTimeout(parentCtx, h.Config.PythonServiceTimeout)
 	}
 	defer cancel()
 
@@ -115,7 +116,7 @@ func (h *Handler) forwardToPython(r *http.Request, sessionID, text, platformName
 		"text":       text,
 		"platform":   platformName,
 	}
-	result, err := h.pythonRequest("/agent/run", body, 0)
+	result, err := h.pythonRequest(r.Context(), "/agent/run", body, 0)
 	if err != nil {
 		return "", err
 	}
@@ -127,7 +128,7 @@ func (h *Handler) forwardToPython(r *http.Request, sessionID, text, platformName
 // S3-02: Returns the full Python response (events array + data) instead of just reply text.
 // The platform adapter uses this to extract card/interrupt/status events for active push.
 func (h *Handler) forwardNormalized(ctx context.Context, msg *platform.InboundMessage) (string, error) {
-	result, err := h.pythonRequest("/agent/run", map[string]interface{}{
+	result, err := h.pythonRequest(ctx, "/agent/run", map[string]interface{}{
 		"session_id":  msg.SessionID,
 		"user_id":     msg.UserID,
 		"tenant_id":   msg.TenantID,
@@ -160,13 +161,13 @@ func (h *Handler) forwardNormalized(ctx context.Context, msg *platform.InboundMe
 
 // forwardToPythonV2 sends the full Step-6-compliant request to Python /agent/run.
 func (h *Handler) forwardToPythonV2(r *http.Request, reqBody map[string]interface{}) (map[string]interface{}, error) {
-	return h.pythonRequest("/agent/run", reqBody, 0)
+	return h.pythonRequest(r.Context(), "/agent/run", reqBody, 0)
 }
 
 // forwardResumeToPython sends a resume request to Python /agent/resume.
 // S3-17: Accept context.Context instead of *http.Request for trace preservation.
 func (h *Handler) forwardResumeToPython(ctx context.Context, reqBody map[string]interface{}) (map[string]interface{}, error) {
-	return h.pythonRequest("/agent/resume", reqBody, 0)
+	return h.pythonRequest(ctx, "/agent/resume", reqBody, 0)
 }
 
 // --- Webhook dispatch (Step 7 platform adapters) ---
