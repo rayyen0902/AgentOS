@@ -21,6 +21,7 @@ from app.agents.base import (
     StatusEvent,
 )
 from app.agents.llm_util import llm_chat
+from app.agents.shared_util import now_iso
 from app.identity.registry import CAPABILITY_REGISTRY
 from config import settings
 
@@ -56,6 +57,7 @@ INTENT_CLASSIFY_SYSTEM_PROMPT = """你是 AgentOS 的前台路由 Agent。
 
 async def classify_intent(user_input: str) -> dict:
     """调用 Flash LLM 进行意图分类，3s 超时"""
+    raw = None
     try:
         raw = await llm_chat(
             model=settings.LLM_FLASH_MODEL,
@@ -69,7 +71,7 @@ async def classify_intent(user_input: str) -> dict:
         result = json.loads(raw)
         return result
     except (json.JSONDecodeError, Exception) as e:
-        logger.warning(f"[classify_intent] parse failed: {e}, raw={raw if 'raw' in dir() else 'N/A'}")
+        logger.warning(f"[classify_intent] parse failed: {e}, raw={raw or 'N/A'}")
         return {
             "intent": "chat",
             "confidence": 0.3,
@@ -560,5 +562,4 @@ async def resume_agent(
 
 
 def _now() -> str:
-    from app.agents.shared_util import now_iso
     return now_iso()

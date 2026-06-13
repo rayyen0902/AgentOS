@@ -65,7 +65,10 @@ func NewWithPlatforms(cfg *config.Config, sm *session.Manager, broker *sse.Broke
 // pythonRequest is the shared low-level HTTP call for all Go→Python forwarding paths.
 // Uses a shared http.Client with connection pooling; custom timeout uses context.WithTimeout.
 func (h *Handler) pythonRequest(endpoint string, reqBody interface{}, timeout time.Duration) (map[string]interface{}, error) {
-	payload, _ := json.Marshal(reqBody)
+	payload, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request body: %w", err)
+	}
 
 	targetURL := strings.TrimRight(h.Config.PythonServiceURL, "/") + endpoint
 

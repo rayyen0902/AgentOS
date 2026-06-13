@@ -61,6 +61,9 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 	traceID := middleware.GetTraceID(r.Context())
 	ctx := r.Context()
 
+	// Limit request body to 1MB to prevent OOM DoS
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
 	var body struct {
 		SessionID string `json:"session_id"`
 		Text      string `json:"text"`
