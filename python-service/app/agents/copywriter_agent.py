@@ -260,7 +260,7 @@ class CopywriterAgent(BaseAgent):
             interrupt=interrupt,
             events=events,
             card=card,
-            done=False,
+            done=interrupt is None,
         )
 
     async def resume(self, ctx: SessionContext, reply: str) -> AgentResult:

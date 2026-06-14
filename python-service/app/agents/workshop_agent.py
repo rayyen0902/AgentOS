@@ -297,6 +297,13 @@ class WorkshopAgent(BaseAgent):
             created_at=_now(),
         ))
 
+        # Build natural-language reply from recommendation results
+        if enriched_products:
+            product_names = "、".join(p.get("name", "未知") for p in enriched_products[:3])
+            reply = f"为您精选了 {len(enriched_products)} 款产品：{product_names}，看看有没有喜欢的~"
+        else:
+            reply = "暂时没有找到合适的产品推荐，稍后再试试~"
+
         # ── Step 6: [中断] 成分过敏确认 ──
         interrupt = None
         if conflict_result.has_urgent:

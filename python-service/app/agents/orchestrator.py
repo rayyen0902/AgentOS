@@ -497,6 +497,11 @@ async def _delegate_to_agent(
             done=True,
             error=str(e),
         )
+    finally:
+        # 无论成功/超时/异常，恢复 stage 为 idle，防止 session 永久卡死
+        if "stage" in ctx.agent_state:
+            ctx.agent_state["stage"] = "idle"
+            ctx.agent_state["current_agent"] = None
 
 
 async def resume_agent(
@@ -547,6 +552,8 @@ async def resume_agent(
         result.events = events + result.events
         if result.interrupt:
             result.state["stage"] = "agent_interrupted"
+            result.state["current_agent"] = agent_type
+            result.state["interrupt_started_at"] = _now()
         else:
             result.state["stage"] = "idle"
             result.state["current_agent"] = None
@@ -568,6 +575,11 @@ async def resume_agent(
             done=True,
             error=str(e),
         )
+    finally:
+        # 无论成功/超时/异常，恢复 stage 为 idle，防止 session 永久卡死
+        if "stage" in ctx.agent_state:
+            ctx.agent_state["stage"] = "idle"
+            ctx.agent_state["current_agent"] = None
 
 
 def _now() -> str:

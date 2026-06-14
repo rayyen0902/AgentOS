@@ -137,8 +137,18 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	if errors.Is(err, session.ErrSessionNotFound) || state == nil {
 		// Session not in Redis → create
-		userID, _ := strconv.ParseInt(body.UserID, 10, 64)
-		tenantID, _ := strconv.ParseInt(body.TenantID, 10, 64)
+		userID, err2 := strconv.ParseInt(body.UserID, 10, 64)
+		if err2 != nil {
+			middleware.WriteJSON(w, model.CodeBadRequest,
+				model.NewErrorResponse(model.CodeBadRequest, "invalid user_id", traceID))
+			return
+		}
+		tenantID, err2 := strconv.ParseInt(body.TenantID, 10, 64)
+		if err2 != nil {
+			middleware.WriteJSON(w, model.CodeBadRequest,
+				model.NewErrorResponse(model.CodeBadRequest, "invalid tenant_id", traceID))
+			return
+		}
 		state, err = h.Session.Create(ctx, body.SessionID, userID, tenantID, body.Platform)
 		if err != nil {
 			log.Printf("[ERROR] session create: %v", err)
